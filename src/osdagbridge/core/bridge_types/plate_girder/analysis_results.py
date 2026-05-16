@@ -266,18 +266,28 @@ class PlateGirderAnalysisResults:
         if disp_da is None:
             return {n: {"dx": 0.0, "dy": 0.0, "dz": 0.0} for n in nodes}
 
-        # ospgrillage stores translation as "x", "y", "z" in the dataset
-        comp_map = {"dx": "x", "dy": "y", "dz": "z"}
+        # Try both single-letter and prefixed component names
+        # Some ospgrillage versions use 'x', 'y', 'z', others use 'dx', 'dy', 'dz'
+        lookup_map = {
+            "dx": ["x", "dx"],
+            "dy": ["y", "dy"],
+            "dz": ["z", "dz"]
+        }
         
         results = {}
         for nid in nodes:
             node_results = {}
-            for out_name, ds_name in comp_map.items():
-                try:
-                    val_m = float(disp_da.sel(Loadcase=loadcase, Node=nid, Component=ds_name))
-                    node_results[out_name] = round(val_m * 1000, 6) + 0.0 # Convert to mm
-                except Exception:
-                    node_results[out_name] = 0.0
+            for out_name, ds_names in lookup_map.items():
+                val_m = 0.0
+                for ds_name in ds_names:
+                    try:
+                        val = float(disp_da.sel(Loadcase=loadcase, Node=nid, Component=ds_name))
+                        if not pd.isna(val):
+                            val_m = val
+                            break
+                    except Exception:
+                        continue
+                node_results[out_name] = round(val_m * 1000, 6) + 0.0 # Convert to mm
             results[nid] = node_results
             
         return results
@@ -1042,12 +1052,12 @@ class PlateGirderAnalysisResults:
         Parameters
         ----------
         category : str
-            'girder_sw', 'dead', 'moving', 'reactions', 'forces', 
-            'girder_paths', 'moving_trace', 'envelopes', 'critical_state'
+            'girder_sw', 'dead', 'moving', 'reactions', 'forces', 'deflections',
+            'girder_paths', 'moving_trace', 'envelopes', 'critical_state', 'intersections'
         kwargs : dict
             - name : str (Load case or Category name)
             - girder : str (Optional girder name)
-            - component : str (e.g., 'Vy_i', 'Mz_j')
+            - component : str (e.g., 'Vy_i', 'dy')
 
         Returns
         -------
@@ -1081,6 +1091,9 @@ class PlateGirderAnalysisResults:
         elif category == "forces":
             if not name or not girder or not comp: return [], []
             df = self._get_forces_df(name, girder, comp)
+        elif category == "deflections":
+            if not name or not girder or not comp: return [], []
+            df = self._get_displacements_df(name, girder, comp)
         elif category == "moving_trace":
             if not name or not girder or not comp: return [], []
             df = self._get_moving_trace_df(name, girder, comp)
@@ -1089,6 +1102,8 @@ class PlateGirderAnalysisResults:
         elif category == "critical_state":
             if not name or not comp: return [], []
             df = self._get_critical_state_df(name, comp)
+        elif category == "intersections":
+            df = self.get_intersection_vertical_forces(name)
 
         if df is not None and not df.empty:
             return df.values.tolist(), df.columns.tolist()
@@ -1257,25 +1272,30 @@ class PlateGirderAnalysisResults:
         if disp_da is None:
             return pd.DataFrame()
 
-        # ospgrillage stores static displacements (from ops.nodeDisp) under the
-        # single-letter components "x", "y", "z". The "dx"/"dy"/"dz" slots hold
-        # nodal velocity (ops.nodeVel) which is NaN for a static analysis.
-        # Map the graph-engine convention ("dy") to the live dataset key ("y").
-        _DISP_COMPONENT_MAP = {"dx": "x", "dy": "y", "dz": "z"}
-        ds_component = _DISP_COMPONENT_MAP.get(component, component)
+        # Try both single-letter and prefixed component names
+        lookup_candidates = {
+            "dx": ["x", "dx"],
+            "dy": ["y", "dy"],
+            "dz": ["z", "dz"]
+        }.get(component, [component])
 
         rows = []
         for nid in node_path:
-            try:
-                val_m = float(
-                    disp_da.sel(
-                        Loadcase=load_case, Node=nid, Component=ds_component
-                    )
-                )
+            val_m = 0.0
+            found = False
+            for cand in lookup_candidates:
+                try:
+                    val = float(disp_da.sel(Loadcase=load_case, Node=nid, Component=cand))
+                    if not pd.isna(val):
+                        val_m = val
+                        found = True
+                        break
+                except Exception:
+                    continue
+            
+            if found or val_m == 0.0:
                 x_coord = nodes_coords[nid][0] if nid in nodes_coords else 0.0
                 rows.append({"Node": nid, "_x": x_coord, component: round(val_m * 1000, 6) + 0.0})
-            except Exception:
-                pass
 
         if not rows:
             return pd.DataFrame()
@@ -1626,8 +1646,15 @@ class PlateGirderAnalysisResults:
         if not elem_info:
             return pd.DataFrame()
 
+        # 3. Collect all nodes for displacement pre-fetching
+        all_nodes = set()
+        for info in elem_info.values():
+            all_nodes.add(info["i_node"])
+            all_nodes.add(info["j_node"])
+        all_nodes_list = list(all_nodes)
+
         # ------------------------------------------------------------------
-        # 3. For each load case read all force components for every transverse element
+        # 4. For each load case read all force components and displacements
         # ------------------------------------------------------------------
         rows = []
         valid_eids = list(elem_info.keys())
@@ -1637,6 +1664,8 @@ class PlateGirderAnalysisResults:
         for lc in lc_list:
             try:
                 subset = self.ds.sel(Loadcase=lc, Element=valid_eids)
+                # Pre-fetch all displacements for this LC
+                lc_disps = self.get_nodal_deflections(all_nodes_list, lc)
             except Exception:
                 continue
 
@@ -1649,6 +1678,10 @@ class PlateGirderAnalysisResults:
                 except Exception:
                     f_dict = {c: None for c in comps}
 
+                # Get displacements (in mm)
+                di = lc_disps.get(info["i_node"], {"dx": 0.0, "dy": 0.0, "dz": 0.0})
+                dj = lc_disps.get(info["j_node"], {"dx": 0.0, "dy": 0.0, "dz": 0.0})
+
                 row = {
                     "LoadCase":  lc,
                     "Element":   eid,
@@ -1657,6 +1690,12 @@ class PlateGirderAnalysisResults:
                     "Z_j (m)":   info["z_j"],
                     "Node_i":    info["i_node"],
                     "Node_j":    info["j_node"],
+                    "dx_i (mm)": di["dx"],
+                    "dy_i (mm)": di["dy"],
+                    "dz_i (mm)": di["dz"],
+                    "dx_j (mm)": dj["dx"],
+                    "dy_j (mm)": dj["dy"],
+                    "dz_j (mm)": dj["dz"]
                 }
                 
                 for c in comps:
@@ -1693,18 +1732,51 @@ class PlateGirderAnalysisResults:
         # Group by load case, then by X position
         for lc, lc_df in df.groupby("LoadCase", sort=False):
             print(f"\n>>> Load Case: {lc}")
-            print("-" * 90)
+            print("-" * 130)
 
             for x_pos, x_df in lc_df.groupby("X (m)", sort=True):
-                print(f"  Cross-section at X = {x_pos:.4f} m")
-                display_df = x_df[[
-                    "Element", "Node_i", "Z_i (m)", "Vy_i (kN)", "Vx_i (kN)", "Vz_i (kN)", "Mx_i (kNm)", "My_i (kNm)", "Mz_i (kNm)",
-                    "Node_j", "Z_j (m)", "Vy_j (kN)", "Vx_j (kN)", "Vz_j (kN)", "Mx_j (kNm)", "My_j (kNm)", "Mz_j (kNm)"
-                ]].reset_index(drop=True)
-                # Use a wider display for all components
+                print(f"\n  Cross-section at X = {x_pos:.4f} m")
+                
+                # Flatten the start/end node data into a vertical format for better readability
+                reformatted_rows = []
+                for _, r in x_df.iterrows():
+                    # Row for Node i
+                    reformatted_rows.append({
+                        "Element": r["Element"],
+                        "Node":    f"{int(r['Node_i'])} (i)",
+                        "Z (m)":   r["Z_i (m)"],
+                        "dy (mm)": r["dy_i (mm)"],
+                        "dx (mm)": r["dx_i (mm)"],
+                        "dz (mm)": r["dz_i (mm)"],
+                        "Vy (kN)": r["Vy_i (kN)"],
+                        "Vx (kN)": r["Vx_i (kN)"],
+                        "Vz (kN)": r["Vz_i (kN)"],
+                        "Mx (kNm)": r["Mx_i (kNm)"],
+                        "My (kNm)": r["My_i (kNm)"],
+                        "Mz (kNm)": r["Mz_i (kNm)"]
+                    })
+                    # Row for Node j
+                    reformatted_rows.append({
+                        "Element": "", # Keep it empty for visual grouping
+                        "Node":    f"{int(r['Node_j'])} (j)",
+                        "Z (m)":   r["Z_j (m)"],
+                        "dy (mm)": r["dy_j (mm)"],
+                        "dx (mm)": r["dx_j (mm)"],
+                        "dz (mm)": r["dz_j (mm)"],
+                        "Vy (kN)": r["Vy_j (kN)"],
+                        "Vx (kN)": r["Vx_j (kN)"],
+                        "Vz (kN)": r["Vz_j (kN)"],
+                        "Mx (kNm)": r["Mx_j (kNm)"],
+                        "My (kNm)": r["My_j (kNm)"],
+                        "Mz (kNm)": r["Mz_j (kNm)"]
+                    })
+                
+                display_df = pd.DataFrame(reformatted_rows)
+                
+                # Use a wider display but with fewer columns per row to avoid messy wrapping
                 with pd.option_context('display.max_columns', None, 'display.width', 1000):
                     print(display_df.to_string(index=False))
-                print()
+                print("-" * 60)
 
         print("=" * 90)
 
