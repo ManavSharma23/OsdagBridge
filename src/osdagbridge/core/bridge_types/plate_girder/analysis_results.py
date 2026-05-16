@@ -1187,7 +1187,7 @@ class PlateGirderAnalysisResults:
                 nodes_e = ops.eleNodes(eid_e)
                 c_rb = "Vy_j" if n2_e == nodes_e[1] else "Vy_i"
 
-                ra = float(self.ds.sel(Loadcase=load_case, Element=eid_s, Component=c_ra)["forces"]) / 1000
+                ra = -float(self.ds.sel(Loadcase=load_case, Element=eid_s, Component=c_ra)["forces"]) / 1000
                 rb = -float(self.ds.sel(Loadcase=load_case, Element=eid_e, Component=c_rb)["forces"]) / 1000
                 
                 rows.append({"Girder": g_name, "Ra (kN)": round(ra, 3), "Rb (kN)": round(rb, 3)})
@@ -1514,6 +1514,177 @@ class PlateGirderAnalysisResults:
             print(f"\nTotal Vehicle Weight (Vertical): {df.attrs.get('total_v', 0):.2f} kN")
         print("=" * 110)
 
+<<<<<<< Updated upstream
+=======
+    # ========================================================
+    # VERTICAL FORCE AT GIRDER INTERSECTIONS (TRANSVERSE SLAB)
+    # ========================================================
+    def get_intersection_vertical_forces(self, load_case_filter=None):
+        """
+        Computes the vertical (global-Y / upward) force at every girder-intersection
+        node contributed by the transverse slab elements, for every load case.
+
+        BACKGROUND
+        ----------
+        In the ospgrillage 3-D grillage model the coordinate axes are:
+            X  – longitudinal (along the span)
+            Z  – transverse  (across the bridge width)
+            Y  – vertical    (perpendicular to the deck surface, pointing UP)
+
+        Transverse slab elements run in the global-Z direction. In the standard
+        ospgrillage orientation:
+            local-x  → global Z  (along element)
+            local-y  → global Y  (vertical)
+            local-z  → global X  (longitudinal)
+        Therefore  Vy_i / Vy_j  (shear in local-y) = vertical shear in global-Y.
+
+        At every intersection node:
+          - If the node is the  i-end  of a transverse element → add  Vy_i
+          - If the node is the  j-end  of a transverse element → add  Vy_j
+          (interior nodes shared by two elements receive contributions from both.)
+
+        Parameters
+        ----------
+        load_case_filter : str or list, optional
+            Only include load cases whose name contains this string / any of these
+            strings.  When None all load cases are processed.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: LoadCase | Element | X (m) | Z_i (m) | Z_j (m)
+                     | Node_i | Node_j | Vy_i (kN) | Vy_j (kN)
+        """
+        # ------------------------------------------------------------------
+        # 0. Normalise filter
+        # ------------------------------------------------------------------
+        if load_case_filter is None:
+            lc_list = self.get_available_loadcases()
+        else:
+            filters = [load_case_filter] if isinstance(load_case_filter, str) else list(load_case_filter)
+            lc_list = [lc for lc in self.get_available_loadcases()
+                       if any(f in str(lc) for f in filters)]
+
+        if not lc_list:
+            return pd.DataFrame()
+
+        # ------------------------------------------------------------------
+        # 1. Collect all transverse slab element IDs
+        #    (interior transverse_slab + start_edge + end_edge)
+        # ------------------------------------------------------------------
+        trans_eids = []
+        for member_key in ("transverse_slab", "start_edge", "end_edge"):
+            try:
+                ids = self.bridge.model.get_element(member=member_key, options="elements")
+                # Fallback for broken ospgrillage get_element in transverse_slab
+                if not ids and member_key == "transverse_slab":
+                    ids = [ele[0] for ele in self.bridge.model.Mesh_obj.trans_ele]
+                if ids:
+                    trans_eids.extend(ids)
+            except Exception:
+                pass
+
+        if not trans_eids:
+            return pd.DataFrame()
+
+        # ------------------------------------------------------------------
+        # 2. For each element record its node connectivity and node coordinates
+        #    ops.eleNodes(eid) → [i_node, j_node]
+        #    ops.nodeCoord(n)  → [x, y, z]
+        # ------------------------------------------------------------------
+        elem_info = {}          # eid → {i_node, j_node, x, z_i, z_j}
+        for eid in trans_eids:
+            try:
+                i_node, j_node = ops.eleNodes(eid)
+                xi, _yi, zi = ops.nodeCoord(i_node)
+                xj, _yj, zj = ops.nodeCoord(j_node)
+                elem_info[eid] = {
+                    "i_node": i_node,
+                    "j_node": j_node,
+                    "x":      round((xi + xj) / 2.0, 6),   # same for both ends in a transverse element
+                    "z_i":    round(zi, 6),
+                    "z_j":    round(zj, 6),
+                }
+            except Exception:
+                continue
+
+        if not elem_info:
+            return pd.DataFrame()
+
+        # ------------------------------------------------------------------
+        # 3. For each load case read Vz_i and Vz_j for every transverse element
+        # ------------------------------------------------------------------
+        rows = []
+        valid_eids = list(elem_info.keys())
+
+        for lc in lc_list:
+            try:
+                subset = self.ds.sel(Loadcase=lc, Element=valid_eids)
+            except Exception:
+                continue
+
+            for eid in valid_eids:
+                info = elem_info[eid]
+                try:
+                    vy_i = float(subset.sel(Element=eid, Component="Vy_i")["forces"]) / 1000.0
+                    vy_j = float(subset.sel(Element=eid, Component="Vy_j")["forces"]) / 1000.0
+                except Exception:
+                    vy_i = None
+                    vy_j = None
+
+                rows.append({
+                    "LoadCase":  lc,
+                    "Element":   eid,
+                    "X (m)":     info["x"],
+                    "Z_i (m)":   info["z_i"],
+                    "Z_j (m)":   info["z_j"],
+                    "Node_i":    info["i_node"],
+                    "Node_j":    info["j_node"],
+                    "Vy_i (kN)": round(vy_i, 4) if vy_i is not None else "-",
+                    "Vy_j (kN)": round(vy_j, 4) if vy_j is not None else "-",
+                })
+
+        return pd.DataFrame(rows)
+
+    def print_intersection_vertical_forces(self, load_case_filter=None):
+        """
+        Interactive print wrapper for get_intersection_vertical_forces().
+        Groups output by load case, then by X-position (cross-section).
+        Each block shows every transverse element at that cross-section with
+        its i-node and j-node vertical forces (Vz_i, Vz_j) in kN.
+        """
+        print("\n" + "=" * 90)
+        print(" " * 20 + "VERTICAL FORCE AT GIRDER INTERSECTIONS (TRANSVERSE SLAB)")
+        print("=" * 90)
+        print("NOTE: Vy = vertical (global-Y / upward) shear from transverse slab elements.")
+        print("      Vy_i = force at i-node (start), Vy_j = force at j-node (end).")
+        print("      Positive value = upward force.")
+        print("=" * 90)
+
+        df = self.get_intersection_vertical_forces(load_case_filter)
+
+        if df.empty:
+            print("❌ No transverse slab results found. Check that the model has been analysed.")
+            print("=" * 90)
+            return
+
+        # Group by load case, then by X position
+        for lc, lc_df in df.groupby("LoadCase", sort=False):
+            print(f"\n>>> Load Case: {lc}")
+            print("-" * 90)
+
+            for x_pos, x_df in lc_df.groupby("X (m)", sort=True):
+                print(f"  Cross-section at X = {x_pos:.4f} m")
+                display_df = x_df[[
+                    "Element", "Node_i", "Z_i (m)", "Vy_i (kN)",
+                    "Node_j", "Z_j (m)", "Vy_j (kN)"
+                ]].reset_index(drop=True)
+                print(display_df.to_string(index=False))
+                print()
+
+        print("=" * 90)
+
+>>>>>>> Stashed changes
     def run_interactive_viewer(self):
 
         while True:
