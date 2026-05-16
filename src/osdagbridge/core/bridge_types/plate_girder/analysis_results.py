@@ -208,32 +208,41 @@ class PlateGirderAnalysisResults:
         vehicle_moving = []
         dead_loads = []
 
-        for lc in all_lc:
+        # Retrieve known static vehicle load cases dynamically from the bridge object if available
+        static_vehicle_names = set()
+        if hasattr(self, 'bridge') and hasattr(self.bridge, 'vehicle_load_cases_list'):
+            for v_lc in self.bridge.vehicle_load_cases_list:
+                static_vehicle_names.add(v_lc.name)
 
-            name = str(lc).lower()
+        for lc in all_lc:
+            name_str = str(lc)
+            name_lower = name_str.lower()
 
             # -----------------------------
             # MOVING VEHICLES
             # -----------------------------
-            if "moving" in name:
+            if "moving" in name_lower:
                 vehicle_moving.append(lc)
                 continue
 
             # -----------------------------
             # STATIC VEHICLES
-            # Detect your naming pattern
             # -----------------------------
-            if name.startswith("case"):
+            # If we dynamically found vehicle names, use them for exact matching
+            if static_vehicle_names and name_str in static_vehicle_names:
                 vehicle_static.append(lc)
                 continue
-
-            if "classa" in name or "70r" in name:
-                vehicle_static.append(lc)
-                continue
+            
+            # Fallback legacy logic if bridge context is missing
+            if not static_vehicle_names:
+                if name_lower.startswith("case") or "class" in name_lower or "70r" in name_lower:
+                    vehicle_static.append(lc)
+                    continue
 
             # -----------------------------
             # DEAD LOADS
             # -----------------------------
+            # Any load case not identified as a vehicle is classified as a dead load
             dead_loads.append(lc)
 
         return {
@@ -244,43 +253,45 @@ class PlateGirderAnalysisResults:
         }
 
     # ========================================================
-    # OPENSEES NODAL DEFLECTION (FINAL STATE)
+    # NODAL DEFLECTION EXTRACTION (FROM DATASET)
     # ========================================================
-    # def get_girder_deflection(self, girder_nodes, direction):                       #give total deflection
-    #
-    #     dof_map = {"x": 1, "y": 2, "z": 3}
-    #     dof = dof_map[direction]
-    #
-    #     disp = {}
-    #     for n in girder_nodes:
-    #         try:
-    #             disp[n] = ops.nodeDisp(n, dof)
-    #         except Exception:
-    #             disp[n] = 0.0
-    #
-    #     return disp
-    # # ========================================================
-    # # OPENSEES DEFLECTION PER LOADCASE (RE-ANALYSIS)
-    # # ========================================================
-    # def get_deflection_per_loadcase(self, girder_nodes, loadcase, direction):
-    #
-    #     dof_map = {"x": 1, "y": 2, "z": 3}
-    #     dof = dof_map[direction]
-    #
-    #     # reset previous analysis
-    #     ops.wipeAnalysis()
-    #
-    #     # analyze only this loadcase
-    #     self.model.analyze(load_case=[loadcase])
-    #
-    #     disp = {}
-    #     for n in girder_nodes:
-    #         try:
-    #             disp[n] = ops.nodeDisp(n, dof)
-    #         except Exception:
-    #             disp[n] = 0.0
-    #
-    #     return disp
+    def get_nodal_deflections(self, nodes, loadcase):
+        """
+        Extracts translations (dx, dy, dz) for a list of nodes and a specific load case
+        from the analyzed dataset (self.ds).
+        
+        Returns a dictionary: {node_id: {"dx": ..., "dy": ..., "dz": ...}} (in mm)
+        """
+        disp_da = self.ds.get("displacements")
+        if disp_da is None:
+            return {n: {"dx": 0.0, "dy": 0.0, "dz": 0.0} for n in nodes}
+
+        # ospgrillage stores translation as "x", "y", "z" in the dataset
+        comp_map = {"dx": "x", "dy": "y", "dz": "z"}
+        
+        results = {}
+        for nid in nodes:
+            node_results = {}
+            for out_name, ds_name in comp_map.items():
+                try:
+                    val_m = float(disp_da.sel(Loadcase=loadcase, Node=nid, Component=ds_name))
+                    node_results[out_name] = round(val_m * 1000, 6) + 0.0 # Convert to mm
+                except Exception:
+                    node_results[out_name] = 0.0
+            results[nid] = node_results
+            
+        return results
+
+    def get_deflection_per_loadcase(self, girder_nodes, loadcase, direction):
+        """
+        Extracts a specific displacement component for a list of nodes and loadcase.
+        """
+        # Map user input to internal keys
+        dof_map = {"x": "dx", "y": "dy", "z": "dz", "vx": "dx", "vy": "dy", "vz": "dz"}
+        target_comp = dof_map.get(direction.lower(), direction.lower())
+        
+        all_disps = self.get_nodal_deflections(girder_nodes, loadcase)
+        return {nid: all_disps[nid].get(target_comp, 0.0) for nid in girder_nodes}
 
     # ========================================================
     # GRILLAGE CONNECTIVITY
@@ -555,24 +566,24 @@ class PlateGirderAnalysisResults:
         g_filter = to_list(girder_filter)
 
         lc_groups = self.classify_loadcases()
-        moving_lcs = lc_groups["vehicle_moving"]
+        valid_lcs = lc_groups["all"]
 
-        if not moving_lcs:
-            print("❌ No moving load cases found.")
+        if not valid_lcs:
+            print("❌ No load cases found.")
             return
 
         if lc_filter:
-            moving_lcs = [lc for lc in moving_lcs if any(str(f) in lc for f in lc_filter)]
-            if not moving_lcs:
-                print("❌ No moving load cases match the filter.")
+            valid_lcs = [lc for lc in valid_lcs if any(str(f) in lc for f in lc_filter)]
+            if not valid_lcs:
+                print("❌ No load cases match the filter.")
                 return
 
         girder_map, _ = self.build_girders(verbose=False)
         girder_map = self.filter_girders(girder_map)
 
-        print("\n================ VEHICLE ENVELOPES (PER POSITION) ================")
+        print("\n================ MAX/MIN ENVELOPES ================")
 
-        for lc in moving_lcs:
+        for lc in valid_lcs:
             print(f"\n>>> Load Case: {lc}")
 
             lc_data = []
@@ -1111,7 +1122,7 @@ class PlateGirderAnalysisResults:
                 subset = self.ds.sel(Loadcase=lc, Element=elements, Component=component)["forces"]
                 val = float(subset.max()) if "max" in component.lower() else float(subset.min())
                 if abs(float(subset.min())) > abs(float(subset.max())): val = float(subset.min())
-                rows.append({"X Pos": round(x_pos, 3), "LoadCase": lc, f"{component} (kN/kNm)": round(val/1000, 3)})
+                rows.append({"X Pos": round(x_pos, 3) + 0.0, "LoadCase": lc, f"{component} (kN/kNm)": round(val/1000, 3) + 0.0})
             except Exception: pass
         return pd.DataFrame(rows)
 
@@ -1130,10 +1141,10 @@ class PlateGirderAnalysisResults:
                     subset = self.ds.sel(Loadcase=lc, Element=g_data["elements"])["forces"]
                     rows.append({
                         "LoadCase": lc, "Girder": g_name,
-                        "Max Vy": round(float(subset.sel(Component=["Vy_i", "Vy_j"]).max())/1000, 3),
-                        "Min Vy": round(float(subset.sel(Component=["Vy_i", "Vy_j"]).min())/1000, 3),
-                        "Max Mz": round(float(subset.sel(Component=["Mz_i", "Mz_j"]).max())/1000, 3),
-                        "Min Mz": round(float(subset.sel(Component=["Mz_i", "Mz_j"]).min())/1000, 3)
+                        "Max Vy": round(float(subset.sel(Component=["Vy_i", "Vy_j"]).max())/1000, 3) + 0.0,
+                        "Min Vy": round(float(subset.sel(Component=["Vy_i", "Vy_j"]).min())/1000, 3) + 0.0,
+                        "Max Mz": round(float(subset.sel(Component=["Mz_i", "Mz_j"]).max())/1000, 3) + 0.0,
+                        "Min Mz": round(float(subset.sel(Component=["Mz_i", "Mz_j"]).min())/1000, 3) + 0.0
                     })
                 except Exception: pass
         return pd.DataFrame(rows)
@@ -1158,7 +1169,7 @@ class PlateGirderAnalysisResults:
         if best_lc:
             return pd.DataFrame([{
                 "Category": category_name, "Component": component, 
-                "Max Value": round(best_val/1000, 3), "LoadCase": best_lc, "Girder": best_g
+                "Max Value": round(best_val/1000, 3) + 0.0, "LoadCase": best_lc, "Girder": best_g
             }])
         return pd.DataFrame()
 
@@ -1190,7 +1201,7 @@ class PlateGirderAnalysisResults:
                 ra = -float(self.ds.sel(Loadcase=load_case, Element=eid_s, Component=c_ra)["forces"]) / 1000
                 rb = -float(self.ds.sel(Loadcase=load_case, Element=eid_e, Component=c_rb)["forces"]) / 1000
                 
-                rows.append({"Girder": g_name, "Ra (kN)": round(ra, 3), "Rb (kN)": round(rb, 3)})
+                rows.append({"Girder": g_name, "Ra (kN)": round(ra, 3) + 0.0, "Rb (kN)": round(rb, 3) + 0.0})
             except Exception: pass
         return pd.DataFrame(rows)
 
@@ -1206,7 +1217,7 @@ class PlateGirderAnalysisResults:
         for eid in elements:
             try:
                 val = float(self.ds.sel(Loadcase=load_case, Element=eid, Component=component)["forces"]) / 1000
-                rows.append({"Element": str(eid), f"{component} ({unit})": round(val, 3)})
+                rows.append({"Element": str(eid), f"{component} ({unit})": round(val, 3) + 0.0})
             except Exception: pass
         return pd.DataFrame(rows)
 
@@ -1262,7 +1273,7 @@ class PlateGirderAnalysisResults:
                     )
                 )
                 x_coord = nodes_coords[nid][0] if nid in nodes_coords else 0.0
-                rows.append({"Node": nid, "_x": x_coord, component: round(val_m * 1000, 6)})
+                rows.append({"Node": nid, "_x": x_coord, component: round(val_m * 1000, 6) + 0.0})
             except Exception:
                 pass
 
@@ -1326,9 +1337,9 @@ class PlateGirderAnalysisResults:
             
             sw_data.append({
                 "Girder": g_name, "Type": "Line",
-                "Start X": round(s[0], 3), "Start Y": round(s[1], 3), "Start Z": round(s[2], 3),
-                "End X": round(e[0], 3), "End Y": round(e[1], 3), "End Z": round(e[2], 3),
-                "Value (kN/m)": round(val, 2)
+                "Start X": round(s[0], 3) + 0.0, "Start Y": round(s[1], 3) + 0.0, "Start Z": round(s[2], 3) + 0.0,
+                "End X": round(e[0], 3) + 0.0, "End Y": round(e[1], 3) + 0.0, "End Z": round(e[2], 3) + 0.0,
+                "Value (kN/m)": round(val, 2) + 0.0
             })
         df = pd.DataFrame(sw_data)
         df.attrs["total_v"] = total_v_audit
@@ -1350,16 +1361,21 @@ class PlateGirderAnalysisResults:
                     p1, p2 = pts[0], pts[1]
                     val = p1.p / 1000.0
                     total_v_audit += val * math.sqrt((p2.x-p1.x)**2 + (p2.z-p1.z)**2)
-                    row.update({"Type": "Line", "Start X": round(p1.x, 3), "Start Z": round(p1.z, 3), "End X": round(p2.x, 3), "End Z": round(p2.z, 3), "Value (kN/m)": round(val, 3)})
+                    row.update({"Type": "Line", "Start X": round(p1.x, 3) + 0.0, "Start Z": round(p1.z, 3) + 0.0, "End X": round(p2.x, 3) + 0.0, "End Z": round(p2.z, 3) + 0.0, "Value (kN/m)": round(val, 3) + 0.0})
                 elif "patch" in cname and len(pts) >= 4:
                     val = pts[0].p / 1000.0
                     area = (max(p.x for p in pts) - min(p.x for p in pts)) * (max(p.z for p in pts) - min(p.z for p in pts))
                     total_v_audit += val * area
-                    row.update({"Type": "Patch", "P1 X": round(pts[0].x, 2), "P1 Z": round(pts[0].z, 2), "P2 X": round(pts[1].x, 2), "P2 Z": round(pts[1].z, 2), "P3 X": round(pts[2].x, 2), "P3 Z": round(pts[2].z, 2), "P4 X": round(pts[3].x, 2), "P4 Z": round(pts[3].z, 2), "Value (kN/m2)": round(val, 3)})
+                    row.update({"Type": "Patch", "P1 X": round(pts[0].x, 2) + 0.0, "P1 Z": round(pts[0].z, 2) + 0.0, "P2 X": round(pts[1].x, 2) + 0.0, "P2 Z": round(pts[1].z, 2) + 0.0, "P3 X": round(pts[2].x, 2) + 0.0, "P3 Z": round(pts[2].z, 2) + 0.0, "P4 X": round(pts[3].x, 2) + 0.0, "P4 Z": round(pts[3].z, 2) + 0.0, "Value (kN/m2)": round(val, 3) + 0.0})
                 elif "point" in cname and pts:
                     val = pts[0].p / 1000.0
                     total_v_audit += val
-                    row.update({"Type": "Point", "X": round(pts[0].x, 3), "Z": round(pts[0].z, 3), "Value (kN)": round(val, 3)})
+                    row.update({"Type": "Point", "X": round(pts[0].x, 3) + 0.0, "Z": round(pts[0].z, 3) + 0.0, "Value (kN)": round(val, 3) + 0.0})
+                elif "nodal" in cname:
+                    fy = getattr(load, 'Fy', 0.0) / 1000.0
+                    node_tag = getattr(load, 'node_tag', "-")
+                    total_v_audit += fy
+                    row.update({"Type": "Nodal", "Node": node_tag, "Fy (kN)": round(fy, 3) + 0.0})
             except Exception: pass
             case_data.append(row)
         df = pd.DataFrame(case_data)
@@ -1440,13 +1456,13 @@ class PlateGirderAnalysisResults:
 
                         moving_data.append({
                             "Axle":            axle_counter,
-                            "Axle Load (t)":   round(axle_load_kN,  2),
-                            "Global Axle X (m)": round(global_axle_x, 3),
+                            "Axle Load (t)":   round(axle_load_kN,  2) + 0.0,
+                            "Global Axle X (m)": round(global_axle_x, 3) + 0.0,
                             "Wheel":           f"A{axle_counter}{side}",
                             "Side":            side,
-                            "Global X (m)":    round(global_axle_x,  3),
-                            "Global Z (m)":    round(global_wheel_z, 3),
-                            "Wheel Load (t)":  round(wheel_load_kN,  3),
+                            "Global X (m)":    round(global_axle_x,  3) + 0.0,
+                            "Global Z (m)":    round(global_wheel_z, 3) + 0.0,
+                            "Wheel Load (t)":  round(wheel_load_kN,  3) + 0.0,
                         })
                         wheel_counter += 1
 
@@ -1472,13 +1488,13 @@ class PlateGirderAnalysisResults:
                     for p in pts:
                         moving_data.append({
                             "Axle":            axle_counter,
-                            "Axle Load (t)":   round(axle_load_kN, 2),
-                            "Global Axle X (m)": round(global_x + p.x, 3),
+                            "Axle Load (t)":   round(axle_load_kN, 2) + 0.0,
+                            "Global Axle X (m)": round(global_x + p.x, 3) + 0.0,
                             "Wheel":           wheel_counter,
                             "Side":            "-",
-                            "Global X (m)":    round(global_x + p.x, 3),
-                            "Global Z (m)":    round(global_z + p.z, 3),
-                            "Wheel Load (t)":  round(p.p / 1000.0,    3),
+                            "Global X (m)":    round(global_x + p.x, 3) + 0.0,
+                            "Global Z (m)":    round(global_z + p.z, 3) + 0.0,
+                            "Wheel Load (t)":  round(p.p / 1000.0,    3) + 0.0,
                         })
                         wheel_counter += 1
                     axle_counter += 1
@@ -1514,8 +1530,7 @@ class PlateGirderAnalysisResults:
             print(f"\nTotal Vehicle Weight (Vertical): {df.attrs.get('total_v', 0):.2f} kN")
         print("=" * 110)
 
-<<<<<<< Updated upstream
-=======
+
     # ========================================================
     # VERTICAL FORCE AT GIRDER INTERSECTIONS (TRANSVERSE SLAB)
     # ========================================================
@@ -1612,10 +1627,12 @@ class PlateGirderAnalysisResults:
             return pd.DataFrame()
 
         # ------------------------------------------------------------------
-        # 3. For each load case read Vz_i and Vz_j for every transverse element
+        # 3. For each load case read all force components for every transverse element
         # ------------------------------------------------------------------
         rows = []
         valid_eids = list(elem_info.keys())
+        comps = ["Vx_i", "Vx_j", "Vy_i", "Vy_j", "Vz_i", "Vz_j",
+                 "Mx_i", "Mx_j", "My_i", "My_j", "Mz_i", "Mz_j"]
 
         for lc in lc_list:
             try:
@@ -1626,13 +1643,13 @@ class PlateGirderAnalysisResults:
             for eid in valid_eids:
                 info = elem_info[eid]
                 try:
-                    vy_i = float(subset.sel(Element=eid, Component="Vy_i")["forces"]) / 1000.0
-                    vy_j = float(subset.sel(Element=eid, Component="Vy_j")["forces"]) / 1000.0
+                    # Select all force components for this element
+                    forces_val = subset.sel(Element=eid, Component=comps)["forces"].values / 1000.0
+                    f_dict = dict(zip(comps, forces_val))
                 except Exception:
-                    vy_i = None
-                    vy_j = None
+                    f_dict = {c: None for c in comps}
 
-                rows.append({
+                row = {
                     "LoadCase":  lc,
                     "Element":   eid,
                     "X (m)":     info["x"],
@@ -1640,9 +1657,14 @@ class PlateGirderAnalysisResults:
                     "Z_j (m)":   info["z_j"],
                     "Node_i":    info["i_node"],
                     "Node_j":    info["j_node"],
-                    "Vy_i (kN)": round(vy_i, 4) if vy_i is not None else "-",
-                    "Vy_j (kN)": round(vy_j, 4) if vy_j is not None else "-",
-                })
+                }
+                
+                for c in comps:
+                    val = f_dict[c]
+                    unit = "(kN)" if "V" in c else "(kNm)"
+                    row[f"{c} {unit}"] = round(val, 4) + 0.0 if val is not None else "-"
+
+                rows.append(row)
 
         return pd.DataFrame(rows)
 
@@ -1653,13 +1675,13 @@ class PlateGirderAnalysisResults:
         Each block shows every transverse element at that cross-section with
         its i-node and j-node vertical forces (Vz_i, Vz_j) in kN.
         """
-        print("\n" + "=" * 90)
-        print(" " * 20 + "VERTICAL FORCE AT GIRDER INTERSECTIONS (TRANSVERSE SLAB)")
-        print("=" * 90)
-        print("NOTE: Vy = vertical (global-Y / upward) shear from transverse slab elements.")
-        print("      Vy_i = force at i-node (start), Vy_j = force at j-node (end).")
-        print("      Positive value = upward force.")
-        print("=" * 90)
+        print("\n" + "=" * 130)
+        print(" " * 40 + "FORCES AT GIRDER INTERSECTIONS (TRANSVERSE SLAB)")
+        print("=" * 130)
+        print("NOTE: All internal forces from transverse slab elements are shown for each intersection node.")
+        print("      Vx/Vy/Vz = Shears (kN), Mx/My/Mz = Moments (kNm).")
+        print("      _i = values at start node, _j = values at end node.")
+        print("=" * 130)
 
         df = self.get_intersection_vertical_forces(load_case_filter)
 
@@ -1676,15 +1698,79 @@ class PlateGirderAnalysisResults:
             for x_pos, x_df in lc_df.groupby("X (m)", sort=True):
                 print(f"  Cross-section at X = {x_pos:.4f} m")
                 display_df = x_df[[
-                    "Element", "Node_i", "Z_i (m)", "Vy_i (kN)",
-                    "Node_j", "Z_j (m)", "Vy_j (kN)"
+                    "Element", "Node_i", "Z_i (m)", "Vy_i (kN)", "Vx_i (kN)", "Vz_i (kN)", "Mx_i (kNm)", "My_i (kNm)", "Mz_i (kNm)",
+                    "Node_j", "Z_j (m)", "Vy_j (kN)", "Vx_j (kN)", "Vz_j (kN)", "Mx_j (kNm)", "My_j (kNm)", "Mz_j (kNm)"
                 ]].reset_index(drop=True)
-                print(display_df.to_string(index=False))
+                # Use a wider display for all components
+                with pd.option_context('display.max_columns', None, 'display.width', 1000):
+                    print(display_df.to_string(index=False))
                 print()
 
         print("=" * 90)
 
->>>>>>> Stashed changes
+
+    def print_girder_deflections(self, load_case_filter=None, girder_filter=None):
+        """
+        Interactive print for nodal deflections along girder paths.
+        """
+        # Normalise filters
+        if load_case_filter is None:
+            lc_list = self.get_available_loadcases()
+        else:
+            filters = [load_case_filter] if isinstance(load_case_filter, str) else list(load_case_filter)
+            lc_list = [lc for lc in self.get_available_loadcases()
+                       if any(f in str(lc) for f in filters)]
+        
+        if not lc_list:
+            print("❌ No matching load cases found.")
+            return
+
+        g_map, _ = self.build_girders(verbose=False)
+        g_map = self.filter_girders(g_map)
+        
+        if girder_filter:
+            target_girders = [girder_filter] if isinstance(girder_filter, str) else girder_filter
+        else:
+            target_girders = list(g_map.keys())
+
+        print("\n" + "=" * 90)
+        print(" " * 30 + "GIRDER NODAL DEFLECTIONS (mm)")
+        print("=" * 90)
+        print("NOTE: dx (vx) = Longitudinal, dy (vy) = Vertical, dz (vz) = Transverse")
+        print("=" * 90)
+
+        coords, _, _ = self.build_grillage_connectivity()
+
+        for lc in lc_list:
+            print(f"\n>>> Load Case: {lc}")
+            print("-" * 90)
+
+            for g_name in target_girders:
+                if g_name not in g_map: continue
+                print(f"  Girder: {g_name}")
+                
+                nodes = g_map[g_name]["path"]
+                disp_dict = self.get_nodal_deflections(nodes, lc)
+                
+                rows = []
+                for nid in nodes:
+                    x_coord = coords[nid][0] if nid in coords else 0.0
+                    d = disp_dict.get(nid, {"dx": 0.0, "dy": 0.0, "dz": 0.0})
+                    rows.append({
+                        "Node": nid,
+                        "X (m)": round(x_coord, 4),
+                        "dx (vx)": d["dx"],
+                        "dy (vy)": d["dy"],
+                        "dz (vz)": d["dz"]
+                    })
+                
+                df = pd.DataFrame(rows).sort_values("X (m)")
+                print(df.to_string(index=False))
+                print()
+
+        print("=" * 90)
+
+
     def run_interactive_viewer(self):
 
         while True:
@@ -1698,6 +1784,7 @@ class PlateGirderAnalysisResults:
             print("5. Show critical maximum state")
             print("6. Show girder reactions (Ra, Rb)")
             print("7. Load Extraction (Dead + Moving)")
+            print("8. Vertical force at girder intersections (transverse slab)")
             print("0. Exit")
             print("==============================")
 
@@ -1760,9 +1847,9 @@ class PlateGirderAnalysisResults:
                     "4": "Mx_i",
                     "5": "My_i",
                     "6": "Mz_i",
-                    # "7": "Dx",
-                    # "8": "Dy",
-                    # "9": "Dz"
+                    "7": "dx",
+                    "8": "dy",
+                    "9": "dz"
                 }
 
                 while True:
@@ -1838,26 +1925,32 @@ class PlateGirderAnalysisResults:
 
                             comp = component_map[r]
 
-                            # ---------------- FORCES / MOMENTS ----------------
-                            res = self.get_beam_element_results(
-                                girder_elements, lc, comp
-                            )
+                            if comp in ["dx", "dy", "dz"]:
+                                # ---------------- NODAL DISPLACEMENTS ----------------
+                                df = self._get_displacements_df(lc, key, comp)
+                                print(f"\nResults | {key} | {lc} | {comp} (mm)")
+                                print(df.to_string(index=False))
+                            else:
+                                # ---------------- FORCES / MOMENTS ----------------
+                                res = self.get_beam_element_results(
+                                    girder_elements, lc, comp
+                                )
 
-                            print(f"\nResults | {key} | {lc} | {comp}")
+                                print(f"\nResults | {key} | {lc} | {comp}")
 
-                            # Convert results to a pandas DataFrame for better formatting
-                            data = []
-                            for eid, val in res.items():
-                                try:
-                                    # Handle potential array values to get a clean scalar and convert to kN/kNm
-                                    scalar_val = float(val) / 1000 if val is not None else val
-                                except (TypeError, ValueError):
-                                    scalar_val = val
-                                unit = "kN" if "V" in comp else "kNm"
-                                data.append({"Element": eid, f"{comp} ({unit})": scalar_val})
+                                # Convert results to a pandas DataFrame for better formatting
+                                data = []
+                                for eid, val in res.items():
+                                    try:
+                                        # Handle potential array values to get a clean scalar and convert to kN/kNm
+                                        scalar_val = float(val) / 1000 if val is not None else val
+                                    except (TypeError, ValueError):
+                                        scalar_val = val
+                                    unit = "kN" if "V" in comp else "kNm"
+                                    data.append({"Element": eid, f"{comp} ({unit})": scalar_val})
 
-                            df = pd.DataFrame(data)
-                            print(df.to_string(index=False))
+                                df = pd.DataFrame(data)
+                                print(df.to_string(index=False))
 
                 continue
 
@@ -1992,8 +2085,8 @@ class PlateGirderAnalysisResults:
             elif main_choice == "7":
                 while True:
                     print("\n--- Load Extraction Category ---")
-                    print("1. Dead Loads")
-                    print("2. Moving Loads (Vehicles)")
+                    print("1. Static / Environmental Loads (Dead, Wind, etc.)")
+                    print("2. Vehicle Loads (Static & Moving)")
                     print("0. Back")
                     
                     cat = input("Enter choice: ").strip()
@@ -2015,7 +2108,7 @@ class PlateGirderAnalysisResults:
                             continue
 
                         while True:
-                            print("\nSelect Dead Load Case:")
+                            print("\nSelect Static/Environmental Load Case:")
                             for i, (name, _) in enumerate(avail_dead, 1):
                                 print(f"{i}. {name}")
                             print("0. Back")
@@ -2058,6 +2151,18 @@ class PlateGirderAnalysisResults:
                                 print("❌ Invalid selection")
                     else:
                         print("❌ Invalid option")
+                continue
+
+            # ======================================================
+            # OPTION 8 → VERTICAL FORCE AT GIRDER INTERSECTIONS
+            # ======================================================
+            elif main_choice == "8":
+                print("\n--- Transverse Slab Configuration ---")
+                self.print_load_availability()
+                lc_input = input("\nEnter Load Case Filter (e.g. 'ClassA' or 'Dead') or leave blank for all: ").strip()
+                if not lc_input: lc_input = None
+
+                self.print_intersection_vertical_forces(load_case_filter=lc_input)
                 continue
 
             else:

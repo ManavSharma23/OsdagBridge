@@ -29,7 +29,7 @@ from osdagbridge.core.bridge_types.plate_girder.bridge_geometry import BridgeGeo
 from osdagbridge.core.bridge_types.plate_girder.load_placement import LoadPlacementManager
 import warnings
 from osdagbridge.core.bridge_types.plate_girder.analysis_results import PlateGirderAnalysisResults
-from osdagbridge.core.bridge_types.plate_girder.dto import (SectionProperties, SteelProperties, MaterialProperties, GrillageGeometry, DeckLayoutProperties)
+from osdagbridge.core.bridge_types.plate_girder.dto import (SectionProperties, SteelProperties, ConcreteProperties, MaterialProperties, GrillageGeometry, DeckLayoutProperties)
 
 
 class BridgeGrillageModel:
@@ -1294,7 +1294,7 @@ class BridgeGrillageModel:
                     vehicle = vehicle_generator.create()
                     vehicle.set_global_coord(og.Point(x_coord, 0.0, z_coord))
 
-                    lc.add_load(load=vehicle, load_factor=lane_factor)
+                    lc.add_load(load_obj=vehicle, load_factor=lane_factor)
 
                     self.vehicle_moving_loads_by_case[case_num].append(vehicle)
                     self.vehicle_type_map[id(vehicle)] = vehicle_type
@@ -1614,7 +1614,7 @@ if __name__ == "__main__":
     )
 
     # --- Test material values (replace with UI inputs later) ---
-    bridge.create_material(SteelProperties(
+    steel_prop = SteelProperties(
         grade="steel",
         E=200 * GPa,
         v=0.3,
@@ -1622,7 +1622,14 @@ if __name__ == "__main__":
         Fy=250 * MPa,
         E0=200 * GPa,
         b=0.01,
-    ))
+    )
+    concrete_prop = ConcreteProperties(
+        grade="M30",
+        fck=30.0,
+        fctm=2.5,
+        Ecm=31.0 * GPa
+    )
+    bridge.create_material(MaterialProperties(steel_prop=steel_prop, concrete_prop=concrete_prop))
 
     bridge.assign_members()
 
@@ -1636,6 +1643,7 @@ if __name__ == "__main__":
     bridge.create_crash_barrier_load()
     bridge.create_railing_load()
     bridge.create_median_load()
+    bridge.create_wind_load(c_spacing=2.2775, d_depth=1.5, crash_barrier_height=1.0)
     bridge.create_dead_load_combination()
     bridge.vehicle_lane_coordinates()
     bridge.create_vehicle_load_cases()
