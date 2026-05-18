@@ -1,8 +1,9 @@
 import pytest
 from unittest.mock import MagicMock, patch, call
 
-
 from osdagbridge.core.bridge_types.plate_girder.analyser import BridgeGrillageModel
+from osdagbridge.core.utils.codes.irc6_2017 import IRC6_2017
+
 from osdagbridge.core.bridge_types.plate_girder.dto import (
     SectionProperties,
     SteelProperties,
@@ -849,6 +850,51 @@ class TestLiveLoad:
         assert isinstance(result, float)
         assert result == pytest.approx(20.3, rel=1e-3)
 
+    def test_split_carriageway_with_median_produces_lane_coords_from_both_sides(
+        self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm
+    ):
+        """Split carriageway (carriageway_left + carriageway_right) must collect lanes from both sides."""
+        # No single carriageway — only left and right
+        self.bridge.layout.has_component.side_effect = lambda x: x in ("carriageway_left", "carriageway_right")
+
+        # left carriageway: 3.5m wide, z_start=0.0 → 1 lane at z=1.75
+        cw_left = MagicMock()
+        cw_left.width = 3.5
+        cw_left.z_start = 0.0
+
+        # right carriageway: 3.5m wide, z_start=5.0 → 1 lane at z=6.75
+        cw_right = MagicMock()
+        cw_right.width = 3.5
+        cw_right.z_start = 5.0
+
+        self.bridge.layout.get_component.side_effect = lambda name: cw_left if name == "carriageway_left" else cw_right
+
+        # IRC6_2017.table_6(3.5) = 1, table_6A(7.0) = ClassA:2 or Class70R:1
+        # Cannot assign IRC6_2017.table_6 as side_effect because the class-level @patch
+        # already replaces that symbol — calling it would recurse into the mock itself.
+        mock_t6.return_value = 1
+        mock_t6a.return_value = {"vehicle_combinations": [{"ClassA": 2}, {"Class70R": 1}]}
+
+        result = self.bridge.vehicle_lane_coordinates()
+
+        # Collect every z coordinate across all cases and combinations
+        all_z = []
+        for case in result:
+            for coords in case["combinations"].values():
+                for _, z in coords:
+                    all_z.append(z)
+
+        # lane_width = 3.5 / 1 lane = 3.5
+        # Left  lane: z = 0.0 + 0.5 * 3.5 = 1.75
+        # Right lane: z = 5.0 + 0.5 * 3.5 = 6.75
+        left_z_expected  = 0.0 + 0.5 * (3.5 / 1)
+        right_z_expected = 5.0 + 0.5 * (3.5 / 1)
+
+        assert any(abs(z - left_z_expected) < 1e-6 for z in all_z), \
+            f"Left carriageway lane z={left_z_expected} not found in {all_z}"
+        assert any(abs(z - right_z_expected) < 1e-6 for z in all_z), \
+            f"Right carriageway lane z={right_z_expected} not found in {all_z}"
+
     def test_vehicle_length_unknown_returns_25(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("SomethingUnknown")
         assert result == 25.0
@@ -1041,7 +1087,6 @@ class TestPlot:
         
         # Mock the results dataset
         mock_results = MagicMock()
-        # Create mock max displacement
         mock_max_disp = MagicMock()
         mock_max_disp.values = 0.005
         mock_results.displacements.sel.return_value = [mock_max_disp]
@@ -1051,9 +1096,8 @@ class TestPlot:
         mock_max_force.values = 12000.0
         mock_static_results.forces.sel.return_value = [mock_max_force]
 
-        
-        # model.get_results called twice with different parameters
-        bridge.model.get_results.side_effect = lambda **kwargs: mock_static_results if kwargs else mock_results
+        # Deterministic call sequence: first call returns mock_results, second returns mock_static_results
+        bridge.model.get_results.side_effect = [mock_results, mock_static_results]
         
         bridge.plot()
         
@@ -1065,6 +1109,31 @@ class TestPlot:
             bridge.model, mock_results, member="exterior_main_beam_1", component="Mz", loadcase='Deck slab load'
         )
         mock_plt.show.assert_any_call()
+
+    def test_plot_extracts_correct_load_case_names(self, mock_plt, mock_defo, mock_force):
+        """Ensure that hardcoded load case names in plot() remain consistent with analyser."""
+        bridge = BridgeGrillageModel()
+        bridge.model = MagicMock()
+        bridge.model.get_element.side_effect = lambda member, options: [101]
+
+        mock_results = MagicMock()
+        mock_max_disp = MagicMock()
+        mock_max_disp.values = 0.001
+        mock_results.displacements.sel.return_value = [mock_max_disp]
+
+        mock_static_results = MagicMock()
+        mock_max_force = MagicMock()
+        mock_max_force.values = 5000.0
+        mock_static_results.forces.sel.return_value = [mock_max_force]
+
+        bridge.model.get_results.side_effect = [mock_results, mock_static_results]
+        bridge.plot()
+
+        # get_results() called twice: once with no args, once with load_case=[]
+        assert bridge.model.get_results.call_count == 2
+        first_call_kwargs = bridge.model.get_results.call_args_list[1]
+        # Second call must include 'Deck slab load' as the load case
+        assert first_call_kwargs == call(load_case=['Deck slab load'])
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
 class TestCreateGoverningLLLoadCase:
@@ -1123,3 +1192,133 @@ class TestCreateGoverningLLLoadCase:
         assert bridge.governing_ll_name == "case 1"
         assert bridge.model.analyze.call_count == 1
 
+
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_model")
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.IRC6_2017.table_6A")
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.IRC6_2017.table_6")
+class TestCreateVehicleLoadCases:
+    """
+    Tests for BridgeGrillageModel.create_vehicle_load_cases().
+
+    Verifies orchestration logic:
+    - raises ValueError when model is not set
+    - creates exactly one load case per vehicle combination
+    - places vehicles at z-coordinates derived from IRC table_6 lane spacing
+    - adds each load case to model exactly once
+    - stores all load cases in self.vehicle_load_cases_list
+    """
+
+    def setup_method(self, method):
+        self.bridge = BridgeGrillageModel()
+        self.bridge.model = MagicMock()
+        self.bridge.L = 33.5
+        self.bridge.layout = MagicMock()
+
+    def _setup_single_carriageway(self, mock_t6, mock_t6a, n_lanes, cw_width, z_start=0.0):
+        self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
+        cw = MagicMock()
+        cw.width = cw_width
+        cw.z_start = z_start
+        self.bridge.layout.get_component.return_value = cw
+        mock_t6.return_value = n_lanes
+        mock_t6a.return_value = {"vehicle_combinations": [{"ClassA": n_lanes}]}
+
+    def test_raises_valueerror_when_model_is_none(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        self.bridge.model = None
+        with pytest.raises(ValueError, match="Model is not available"):
+            self.bridge.create_vehicle_load_cases()
+
+    def test_creates_one_load_case_per_combination(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        """One IRC combination → one og.create_load_case call."""
+        self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=2, cw_width=7.0)
+        mock_lc.return_value = MagicMock()
+
+        self.bridge.create_vehicle_load_cases()
+
+        assert mock_lc.call_count == 1
+
+    def test_load_case_name_reflects_combination(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        """Load case name must follow format 'Case{n} {k}x{vehicle_type}'."""
+        self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=2, cw_width=7.0)
+        mock_lc.return_value = MagicMock()
+
+        self.bridge.create_vehicle_load_cases()
+
+        name_used = mock_lc.call_args_list[0].kwargs["name"]
+        assert name_used == "Case1 2xClassA"
+
+    def test_vehicle_placed_at_correct_z_coordinate(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        """Each vehicle must be placed at z = z_start + (i+0.5) * lane_width from IRC table_6."""
+        n_lanes = 2
+        cw_width = 7.0
+        z_start = 0.0
+        self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=n_lanes, cw_width=cw_width, z_start=z_start)
+
+        mock_vehicle = MagicMock()
+        mock_lm.return_value.create.return_value = mock_vehicle
+        mock_lc.return_value = MagicMock()
+
+        self.bridge.create_vehicle_load_cases()
+
+        # Check that set_global_coord was called with the expected z values
+        set_coord_calls = mock_vehicle.set_global_coord.call_args_list
+        lane_width = cw_width / n_lanes
+        expected_z_coords = [z_start + (i + 0.5) * lane_width for i in range(n_lanes)]
+
+        actual_z_coords = [c.args[0].z for c in set_coord_calls]
+        assert sorted(actual_z_coords) == pytest.approx(sorted(expected_z_coords))
+
+    def test_vehicle_x_coord_is_zero(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        """Vehicles always start at x=0 (longitudinal start of bridge)."""
+        self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=1, cw_width=3.5, z_start=0.0)
+        mock_vehicle = MagicMock()
+        mock_lm.return_value.create.return_value = mock_vehicle
+        mock_lc.return_value = MagicMock()
+
+        self.bridge.create_vehicle_load_cases()
+
+        for c in mock_vehicle.set_global_coord.call_args_list:
+            assert c.args[0].x == pytest.approx(0.0)
+
+    def test_each_load_case_added_to_model(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        """Each created load case must be added to self.model exactly once."""
+        mock_t6.return_value = 2
+        # Two combinations → two calls to add_load_case
+        mock_t6a.return_value = {"vehicle_combinations": [{"ClassA": 2}, {"Class70R": 1}]}
+        self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
+        cw = MagicMock()
+        cw.width = 7.0
+        cw.z_start = 0.0
+        self.bridge.layout.get_component.return_value = cw
+        mock_lc.side_effect = lambda name: MagicMock(name=name)
+
+        self.bridge.create_vehicle_load_cases()
+
+        assert self.bridge.model.add_load_case.call_count == 2
+
+    def test_vehicle_load_cases_list_stored_on_instance(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        """All created load cases must be stored in self.vehicle_load_cases_list."""
+        mock_t6.return_value = 2
+        mock_t6a.return_value = {"vehicle_combinations": [{"ClassA": 2}, {"Class70R": 1}]}
+        self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
+        cw = MagicMock()
+        cw.width = 7.0
+        cw.z_start = 0.0
+        self.bridge.layout.get_component.return_value = cw
+        mock_lc.side_effect = lambda name: MagicMock(name=name)
+
+        result = self.bridge.create_vehicle_load_cases()
+
+        assert hasattr(self.bridge, "vehicle_load_cases_list")
+        assert len(self.bridge.vehicle_load_cases_list) == 2
+        assert self.bridge.vehicle_load_cases_list == result
+
+    def test_create_load_model_called_with_uppercase_vehicle_type(self, mock_t6, mock_t6a, mock_lm, mock_lc):
+        """og.create_load_model must be called with model_type=vehicle_type.upper()."""
+        self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=1, cw_width=3.5, z_start=0.0)
+        mock_lc.return_value = MagicMock()
+
+        self.bridge.create_vehicle_load_cases()
+
+        mock_lm.assert_called_once_with(model_type="CLASSA")
