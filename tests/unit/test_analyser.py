@@ -742,23 +742,28 @@ class TestWindLoad:
 
         self.bridge.create_wind_load(c_spacing=2.2775, d_depth=1.5, crash_barrier_height=1.0)
         
-        transverse_called = False
-        longitudinal_called = False
-        uplift_called = False
+        transverse_forces = []
+        longitudinal_forces = []
+        uplift_forces = []
 
         for call_args in mock_ld.call_args_list:
             kwargs = call_args.kwargs
             if kwargs.get("loadtype") == "nodal":
                 if kwargs.get("Fz", 0) > 0 and kwargs.get("Fx", 0) == 0:
-                    transverse_called = True
+                    transverse_forces.append(kwargs.get("Fz"))
                 if kwargs.get("Fx", 0) > 0 and kwargs.get("Fz", 0) == 0:
-                    longitudinal_called = True
+                    longitudinal_forces.append(kwargs.get("Fx"))
                 if kwargs.get("Fy", 0) < 0:
-                    uplift_called = True
+                    uplift_forces.append(kwargs.get("Fy"))
 
-        assert transverse_called, "Transverse nodal load was not created"
-        assert longitudinal_called, "Longitudinal nodal load was not created"
-        assert uplift_called, "Uplift nodal load was not created"
+        assert len(transverse_forces) > 0, "Transverse nodal load was not created"
+        assert len(longitudinal_forces) > 0, "Longitudinal nodal load was not created"
+        assert len(uplift_forces) > 0, "Uplift nodal load was not created"
+
+        # Check exact calculated magnitude values and unit mappings
+        assert transverse_forces[0] == pytest.approx(25000.0, rel=1e-3)
+        assert longitudinal_forces[0] == pytest.approx(2838.541, rel=1e-3)
+        assert uplift_forces[0] == pytest.approx(-34232.812, rel=1e-3)
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_model")
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
@@ -818,15 +823,15 @@ class TestLiveLoad:
                 z_coord = v[0][1]
         assert z_coord == (1.75 + 5.25) / 2
 
-    def test_vehicle_length_class70r_returns_positive_float(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
+    def test_vehicle_length_class70r_returns_exact_length(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("Class70R")
         assert isinstance(result, float)
-        assert result > 0
+        assert result == pytest.approx(15.12, rel=1e-3)
 
-    def test_vehicle_length_classA_returns_positive_float(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
+    def test_vehicle_length_classA_returns_exact_length(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("ClassA")
         assert isinstance(result, float)
-        assert result > 0
+        assert result == pytest.approx(20.3, rel=1e-3)
 
     def test_vehicle_length_unknown_returns_25(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("SomethingUnknown")
