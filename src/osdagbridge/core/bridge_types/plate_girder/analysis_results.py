@@ -40,6 +40,7 @@ PlateGirderAnalysisResults(dataset, bridge, edge_dist)
   get_available_loadcases     List all load-case names in dataset
   classify_loadcases          Group into dead / vehicle_static / vehicle_moving
   get_beam_element_results    Raw force/moment for given elements + LC
+  get_nodal_deflections       Raw displacements (dx, dy, dz) for given nodes + LC
   print_load_availability     Print classified LC summary
 
   ── Public Print Methods (Interactive Menu) ──
@@ -48,6 +49,7 @@ PlateGirderAnalysisResults(dataset, bridge, edge_dist)
   print_critical_max_state    Option 5 – critical position for a component
   print_girder_reactions      Option 6 – Ra/Rb per girder per LC
   print_load_extraction       Option 7 – dead + moving load audit report
+  print_intersection_vertical_forces  Option 8 – Vertical forces at girder intersections (transverse slab)
 
   ── Private DataFrame Builders ──
   _get_girder_sw_df           Girder self-weight tabulation
@@ -57,6 +59,7 @@ PlateGirderAnalysisResults(dataset, bridge, edge_dist)
   _get_envelopes_df           Envelope summary (max/min Vy, Mz) per LC
   _get_critical_state_df      Critical governing position
   _get_reactions_df           Support reactions (Ra, Rb) per girder
+  _get_displacements_df       Nodal deflection data along a girder path
 
   ── Private Print Wrappers ──
   _print_girder_sw_extraction     Print girder self-weight table
@@ -72,17 +75,18 @@ PlateGirderAnalysisResults(dataset, bridge, edge_dist)
   verify_sections             Print section property verification log
 
   ── Interactive Entry Point ──
-  run_interactive_viewer      7-option terminal menu
+  run_interactive_viewer      8-option terminal menu
 
 INTERACTIVE MENU (run_interactive_viewer)
 ------------------------------------------
   1. Show girder paths (BFS)
-  2. Show analysis result (forces/moments per girder & load case)
+  2. Show analysis result (forces/moments/deflections per girder & load case)
   3. Show moving load trace (force vs vehicle position)
   4. Show max/min envelopes (all moving load cases)
   5. Show critical maximum state (governing LC + element)
   6. Show girder reactions (Ra, Rb)
   7. Load extraction (dead loads + IRC:6 vehicle wheel layout)
+  8. Vertical force at girder intersections (transverse slab)
   0. Exit (triggers section verification log)
 
 PROGRAMMATIC QUERY API  –  results.query(category, **kwargs)
@@ -94,6 +98,10 @@ category='girder_paths'
 category='forces'
     Returns element-wise force/moment for one load case + one girder.
     kwargs: name (load-case str), girder ('G1' etc.), component ('Vy_i')
+
+category='deflections'
+    Returns nodal displacements (mm) for one load case + one girder.
+    kwargs: name (load-case str), girder, component ('dy')
 
 category='moving_trace'
     Returns {x_pos, load_case, component (kN/kNm)} across all
@@ -117,16 +125,18 @@ category='moving'
     Returns IRC:6 wheel layout table for one static vehicle load case.
     kwargs: name (load-case name e.g. 'Case1 ClassA L1')
 
+category='intersections'
+    Returns forces and deflections at girder-slab intersection points.
+    kwargs: name (load-case filter)
+
 EXAMPLE USAGE
 -------------
     results = PlateGirderAnalysisResults(dataset=ds, bridge=bridge)
 
     # Programmatic (returns DataFrame):
     df, _ = results.query(category='moving', name='Case1 ClassA L1')
-    df, _ = results.query(category='reactions', name='Case1 ClassA L1')
-    df, _ = results.query(category='forces',
-                          name='Case1 ClassA L1', girder='G3',
-                          component='Mz_i')
+    df, _ = results.query(category='deflections', name='Self Weight', girder='G1', component='dy')
+    df, _ = results.query(category='intersections', name='Self Weight')
 
     # Interactive terminal:
     results.run_interactive_viewer()
@@ -134,8 +144,13 @@ EXAMPLE USAGE
 
 import math
 from collections import defaultdict, deque
-import openseespy.opensees as ops
 import pandas as pd
+import ospgrillage as og
+from typing import Any
+
+# Define ops and tell the IDE explicitly to skip all checks on it
+ops: Any = og.ops 
+
 from osdagbridge.core.utils.common import kN, m, m2
 from osdagbridge.core.utils.codes.irc6_2017 import IRC6_2017
 
