@@ -643,12 +643,13 @@ class TestWindLoad:
         self.bridge.edge_dist = 1.1
         self.bridge.bridge_geometry = MagicMock()
         self.bridge.load_manager = MagicMock()
-        self.bridge.model.Mesh_obj.noz = [0.0, 2.0, 4.0]
+        self.bridge.model.Mesh_obj.noz = [0.0, 1.1, 10.9, 12.0]
         self.bridge.model.Mesh_obj.nox = [0.0, 16.75, 33.5]
         self.bridge.model.Mesh_obj.node_spec = {
-            1: {"coordinate": [0.0, 0.0, 0.0]},
-            2: {"coordinate": [33.5, 0.0, 12.0]}
+            1: {"coordinate": [0.0, 0.0, 1.1]},
+            2: {"coordinate": [33.5, 0.0, 10.9]}
         }
+
 
     def test_raises_valueerror_when_model_is_none(self, mock_lc, mock_ld, mock_wind):
         self.bridge.model = None
@@ -675,11 +676,43 @@ class TestWindLoad:
         mock_wind.return_value = {"Pz": 500.0, "G": 2.0, "FT": 100000.0}
         self.bridge.create_wind_load(c_spacing=2.2775, d_depth=1.5, crash_barrier_height=1.0, partial_safety_factor=1.5)
         found = False
-        for call in self.bridge.model.add_load_case.call_args_list:
-            if call.kwargs.get("load_factor") == 1.5:
+        for call_args in self.bridge.model.add_load_case.call_args_list:
+            if call_args.kwargs.get("load_factor") == 1.5:
                 found = True
                 break
         assert found, "add_load_case not called with load_factor=1.5"
+
+    def test_wind_load_calculates_correct_forces_and_nodal_loads(self, mock_lc, mock_ld, mock_wind):
+        mock_wind.return_value = {"Pz": 500.0, "G": 2.0, "FT": 100000.0}
+        
+        mock_deck = MagicMock()
+        mock_deck.p1.x, mock_deck.p1.z = 0.0, 0.0
+        mock_deck.p2.x, mock_deck.p2.z = 33.5, 0.0
+        mock_deck.p3.x, mock_deck.p3.z = 33.5, 12.0
+        mock_deck.p4.x, mock_deck.p4.z = 0.0, 12.0
+        self.bridge.load_manager.deck_load.return_value = mock_deck
+
+        mock_lc.side_effect = lambda name: MagicMock(name=name, load_groups=[])
+
+        self.bridge.create_wind_load(c_spacing=2.2775, d_depth=1.5, crash_barrier_height=1.0)
+        
+        transverse_called = False
+        longitudinal_called = False
+        uplift_called = False
+
+        for call_args in mock_ld.call_args_list:
+            kwargs = call_args.kwargs
+            if kwargs.get("loadtype") == "nodal":
+                if kwargs.get("Fz", 0) > 0 and kwargs.get("Fx", 0) == 0:
+                    transverse_called = True
+                if kwargs.get("Fx", 0) > 0 and kwargs.get("Fz", 0) == 0:
+                    longitudinal_called = True
+                if kwargs.get("Fy", 0) < 0:
+                    uplift_called = True
+
+        assert transverse_called, "Transverse nodal load was not created"
+        assert longitudinal_called, "Longitudinal nodal load was not created"
+        assert uplift_called, "Uplift nodal load was not created"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_model")
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
@@ -897,3 +930,129 @@ class TestResultHandler:
         self.bridge.model = None
         with pytest.raises(ValueError):
             self.bridge.analyze()
+
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.plt", create=True)
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.opsv", create=True)
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.opsplt", create=True)
+class TestPlotModel:
+    def test_raises_valueerror_when_model_is_none(self, mock_opsplt, mock_opsv, mock_plt):
+        bridge = BridgeGrillageModel()
+        bridge.model = None
+        with pytest.raises(ValueError):
+            bridge.plot_model()
+
+    def test_calls_plotting_functions(self, mock_opsplt, mock_opsv, mock_plt):
+        bridge = BridgeGrillageModel()
+        bridge.model = MagicMock()
+        mock_fig = MagicMock()
+        mock_plt.gcf.return_value = mock_fig
+        
+        bridge.plot_model()
+        
+        mock_opsplt.plot_model.assert_called_once_with(show_nodes="yes", show_nodetags="yes")
+        mock_opsv.plot_model.assert_called_once_with(az_el=(-90, 0), element_labels=0)
+        mock_plt.gcf.assert_called_once()
+        mock_fig.set_size_inches.assert_called_once_with(8, 8)
+        mock_plt.show.assert_called_once()
+
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.plot_force")
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.plot_defo")
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.plt", create=True)
+class TestPlot:
+    def test_raises_valueerror_when_model_is_none(self, mock_plt, mock_defo, mock_force):
+        bridge = BridgeGrillageModel()
+        bridge.model = None
+        with pytest.raises(ValueError):
+            bridge.plot()
+
+    def test_executes_plot_workflow(self, mock_plt, mock_defo, mock_force):
+        bridge = BridgeGrillageModel()
+        bridge.model = MagicMock()
+        
+        # Setup model mock returns
+        bridge.model.get_element.side_effect = lambda member, options: [101]
+        
+        # Mock the results dataset
+        mock_results = MagicMock()
+        # Create mock max displacement
+        mock_max_disp = MagicMock()
+        mock_max_disp.values = 0.005
+        mock_results.displacements.sel.return_value = [mock_max_disp]
+        
+        mock_static_results = MagicMock()
+        mock_max_force = MagicMock()
+        mock_max_force.values = 12000.0
+        mock_static_results.forces.sel.return_value = [mock_max_force]
+
+        
+        # model.get_results called twice with different parameters
+        bridge.model.get_results.side_effect = lambda **kwargs: mock_static_results if kwargs else mock_results
+        
+        bridge.plot()
+        
+        # Verify calls
+        mock_defo.assert_called_once_with(
+            bridge.model, mock_results, member="exterior_main_beam_1", option="nodes", loadcase='girder self weight'
+        )
+        mock_force.assert_called_once_with(
+            bridge.model, mock_results, member="exterior_main_beam_1", component="Mz", loadcase='Deck slab load'
+        )
+        mock_plt.show.assert_any_call()
+
+@patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
+class TestCreateGoverningLLLoadCase:
+    def test_raises_valueerror_when_model_is_none(self, mock_lc):
+        bridge = BridgeGrillageModel()
+        bridge.model = None
+        dataset = MagicMock()
+        with pytest.raises(ValueError):
+            bridge.create_governing_ll_load_case(dataset)
+
+    def test_warns_when_no_static_load_cases(self, mock_lc):
+        bridge = BridgeGrillageModel()
+        bridge.model = MagicMock()
+        dataset = MagicMock()
+        dataset.coords = {"Loadcase": MagicMock(values=[])}
+        with pytest.warns(UserWarning, match="No vehicle static load cases found"):
+            res = bridge.create_governing_ll_load_case(dataset)
+            assert res == dataset
+            assert bridge.ll_load_case is None
+
+    def test_governing_ll_load_case_creation_flow(self, mock_lc):
+        bridge = BridgeGrillageModel()
+        bridge.model = MagicMock()
+        
+        # Setup dataset
+        dataset = MagicMock()
+        dataset.coords = {"Loadcase": MagicMock(values=["case 1", "case 2"])}
+        
+        # Forces selection mocks: case 1 has max |Mz_i| = 50000, case 2 has 20000
+        forces_mock = MagicMock()
+        forces_mock.__abs__.return_value.max.side_effect = [50000.0, 20000.0]
+        dataset.__getitem__.return_value.sel.return_value = forces_mock
+
+        # Setup target load case matching case 1
+        mock_lc_case_1 = MagicMock()
+        mock_lc_case_1.name = "case 1"
+        mock_lc_case_1.load_groups = [{"load": "load_obj_1"}]
+        bridge.vehicle_load_cases_list = [mock_lc_case_1]
+
+        # Mock create_load_case return value for ULS load case
+        mock_uls_lc = MagicMock()
+        mock_lc.return_value = mock_uls_lc
+
+        # Mock self.model.get_results return value for post-analysis
+        post_ds = MagicMock()
+        post_ds.coords = {"Loadcase": MagicMock(values=["case 1", "case 2", "1.5 LL"])}
+        bridge.model.get_results.return_value = post_ds
+
+        res = bridge.create_governing_ll_load_case(dataset, partial_safety_factor=1.5)
+
+        # Assert correct governing case ULS created
+        mock_lc.assert_called_with(name="1.5 LL")
+        mock_uls_lc.add_load.assert_called_once_with("load_obj_1")
+        bridge.model.add_load_case.assert_called_once_with(mock_uls_lc, load_factor=1.5)
+        assert bridge.ll_load_case == mock_uls_lc
+        assert bridge.governing_ll_name == "case 1"
+        assert bridge.model.analyze.call_count == 1
+
