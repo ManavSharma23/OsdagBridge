@@ -12,6 +12,13 @@ from osdagbridge.core.bridge_types.plate_girder.dto import (
     DeckLayoutProperties
 )
 
+from osdagbridge.core.bridge_components.super_structure.plate_girder.geometry import girder_self_weight_kN_m
+from osdagbridge.core.bridge_components.super_structure.deck.geometry import slab_dead_load_kN_m2, wearing_course_dead_load_kN_m2
+from osdagbridge.core.bridge_components.super_structure.footpath.geometry import footpath_dead_load_kN_m2
+from osdagbridge.core.bridge_components.super_structure.crash_barrier.geometry import crash_barrier_dead_load_kN_m
+from osdagbridge.core.bridge_components.super_structure.railing.geometry import railing_dead_load_kN_m
+from osdagbridge.core.bridge_components.super_structure.median.geometry import median_dead_load_kN_m
+
 @pytest.fixture
 def bridge():
     return BridgeGrillageModel()
@@ -320,14 +327,14 @@ class TestDeadLoads:
         bridge.load_manager.crash_barrier_load.return_value = geom_line_mock
         bridge.load_manager.railing_load.return_value = geom_line_mock
         bridge.load_manager.median_line_load.return_value = geom_line_mock
-        # Set float return values to prevent TypeError during formatting
-        mock_girder.return_value = 10.0
-        mock_slab.return_value = 10.0
-        mock_wearing.return_value = 10.0
-        mock_footpath.return_value = 10.0
-        mock_crash.return_value = 10.0
-        mock_railing.return_value = 10.0
-        mock_median.return_value = 10.0
+        # Use actual functions to test computed load values dynamically
+        mock_girder.side_effect = girder_self_weight_kN_m
+        mock_slab.side_effect = slab_dead_load_kN_m2
+        mock_wearing.side_effect = wearing_course_dead_load_kN_m2
+        mock_footpath.side_effect = footpath_dead_load_kN_m2
+        mock_crash.side_effect = crash_barrier_dead_load_kN_m
+        mock_railing.side_effect = railing_dead_load_kN_m
+        mock_median.side_effect = median_dead_load_kN_m
 
     def test_self_weight_raises_valueerror_when_model_is_none(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         with pytest.raises(ValueError):
@@ -439,18 +446,15 @@ class TestDeadLoads:
         mock_lc.return_value = MagicMock()
         bridge.create_self_weight_load()
 
-        expected_calls = []
-        for z_pos in [2.0, 4.0, 6.0]:
-            expected_calls.append(call(x=0, z=z_pos, p=10000.0))
-            expected_calls.append(call(x=33.5, z=z_pos, p=10000.0))
-        mock_vtx.assert_has_calls(expected_calls, any_order=True)
-
+        expected_ld = girder_self_weight_kN_m(1.025) * 1000.0
         expected_ld_calls = []
         for z_pos in [2.0, 4.0, 6.0]:
+            mock_vtx.assert_any_call(x=0, z=z_pos, p=pytest.approx(expected_ld))
+            mock_vtx.assert_any_call(x=33.5, z=z_pos, p=pytest.approx(expected_ld))
             expected_ld_calls.append(call(
                 loadtype="line",
-                point1=f"vtx_0_{z_pos}_10000.0",
-                point2=f"vtx_33.5_{z_pos}_10000.0"
+                point1=f"vtx_0_{z_pos}_{expected_ld}",
+                point2=f"vtx_33.5_{z_pos}_{expected_ld}"
             ))
         mock_ld.assert_has_calls(expected_ld_calls, any_order=True)
         assert mock_lc.return_value.add_load.call_count == 3
@@ -471,14 +475,16 @@ class TestDeadLoads:
 
         bridge.create_deck_load(slab_thickness_m=0.2)
 
-        mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_vtx.assert_any_call(x=2.0, z=2.1, p=10000.0)
-        mock_vtx.assert_any_call(x=3.0, z=3.1, p=10000.0)
-        mock_vtx.assert_any_call(x=4.0, z=4.1, p=10000.0)
+        expected_ld = slab_dead_load_kN_m2(0.2) * 1000.0
+
+        mock_vtx.assert_any_call(x=1.0, z=1.1, p=pytest.approx(expected_ld))
+        mock_vtx.assert_any_call(x=2.0, z=2.1, p=pytest.approx(expected_ld))
+        mock_vtx.assert_any_call(x=3.0, z=3.1, p=pytest.approx(expected_ld))
+        mock_vtx.assert_any_call(x=4.0, z=4.1, p=pytest.approx(expected_ld))
         mock_ld.assert_called_once_with(
             loadtype="patch", name="deck slab",
-            point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0",
-            point3="vtx_3.0_3.1_10000.0", point4="vtx_4.0_4.1_10000.0"
+            point1=f"vtx_1.0_1.1_{expected_ld}", point2=f"vtx_2.0_2.1_{expected_ld}",
+            point3=f"vtx_3.0_3.1_{expected_ld}", point4=f"vtx_4.0_4.1_{expected_ld}"
         )
         mock_lc.return_value.add_load.assert_called_once_with("patch_load_obj")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
@@ -498,11 +504,13 @@ class TestDeadLoads:
 
         bridge.create_wearing_course_load(thickness_m=0.05, partial_safety_factor=1.5)
 
-        mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
+        expected_ld = wearing_course_dead_load_kN_m2(0.05) * 1000.0
+
+        mock_vtx.assert_any_call(x=1.0, z=1.1, p=pytest.approx(expected_ld))
         mock_ld.assert_called_once_with(
             loadtype="patch", name="overlay",
-            point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0",
-            point3="vtx_3.0_3.1_10000.0", point4="vtx_4.0_4.1_10000.0"
+            point1=f"vtx_1.0_1.1_{expected_ld}", point2=f"vtx_2.0_2.1_{expected_ld}",
+            point3=f"vtx_3.0_3.1_{expected_ld}", point4=f"vtx_4.0_4.1_{expected_ld}"
         )
         mock_lc.assert_any_call(name="1.5 DW")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value, load_factor=1.5)
@@ -531,18 +539,20 @@ class TestDeadLoads:
 
         bridge.create_footpath_load()
 
-        mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_vtx.assert_any_call(x=10.0, z=10.1, p=10000.0)
+        expected_ld = footpath_dead_load_kN_m2() * 1000.0
+
+        mock_vtx.assert_any_call(x=1.0, z=1.1, p=pytest.approx(expected_ld))
+        mock_vtx.assert_any_call(x=10.0, z=10.1, p=pytest.approx(expected_ld))
 
         mock_ld.assert_any_call(
             loadtype="patch", name="left footpath",
-            point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0",
-            point3="vtx_3.0_3.1_10000.0", point4="vtx_4.0_4.1_10000.0"
+            point1=f"vtx_1.0_1.1_{expected_ld}", point2=f"vtx_2.0_2.1_{expected_ld}",
+            point3=f"vtx_3.0_3.1_{expected_ld}", point4=f"vtx_4.0_4.1_{expected_ld}"
         )
         mock_ld.assert_any_call(
             loadtype="patch", name="right footpath",
-            point1="vtx_10.0_10.1_10000.0", point2="vtx_20.0_20.1_10000.0",
-            point3="vtx_30.0_30.1_10000.0", point4="vtx_40.0_40.1_10000.0"
+            point1=f"vtx_10.0_10.1_{expected_ld}", point2=f"vtx_20.0_20.1_{expected_ld}",
+            point3=f"vtx_30.0_30.1_{expected_ld}", point4=f"vtx_40.0_40.1_{expected_ld}"
         )
         assert mock_lc.return_value.add_load.call_count == 2
         mock_lc.return_value.add_load.assert_any_call("patch_load_left footpath")
@@ -569,16 +579,18 @@ class TestDeadLoads:
 
         bridge.create_crash_barrier_load()
 
-        mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_vtx.assert_any_call(x=10.0, z=10.1, p=10000.0)
+        expected_ld = crash_barrier_dead_load_kN_m() * 1000.0
+
+        mock_vtx.assert_any_call(x=1.0, z=1.1, p=pytest.approx(expected_ld))
+        mock_vtx.assert_any_call(x=10.0, z=10.1, p=pytest.approx(expected_ld))
         
         mock_ld.assert_any_call(
             loadtype="line", name="left crash barrier",
-            point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0"
+            point1=f"vtx_1.0_1.1_{expected_ld}", point2=f"vtx_2.0_2.1_{expected_ld}"
         )
         mock_ld.assert_any_call(
             loadtype="line", name="right crash barrier",
-            point1="vtx_10.0_10.1_10000.0", point2="vtx_20.0_20.1_10000.0"
+            point1=f"vtx_10.0_10.1_{expected_ld}", point2=f"vtx_20.0_20.1_{expected_ld}"
         )
         assert mock_lc.return_value.add_load.call_count == 2
         mock_lc.return_value.add_load.assert_any_call("line_load_left crash barrier")
@@ -605,16 +617,18 @@ class TestDeadLoads:
 
         bridge.create_railing_load()
 
-        mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_vtx.assert_any_call(x=10.0, z=10.1, p=10000.0)
+        expected_ld = railing_dead_load_kN_m() * 1000.0
+
+        mock_vtx.assert_any_call(x=1.0, z=1.1, p=pytest.approx(expected_ld))
+        mock_vtx.assert_any_call(x=10.0, z=10.1, p=pytest.approx(expected_ld))
         
         mock_ld.assert_any_call(
             loadtype="line", name="left railing",
-            point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0"
+            point1=f"vtx_1.0_1.1_{expected_ld}", point2=f"vtx_2.0_2.1_{expected_ld}"
         )
         mock_ld.assert_any_call(
             loadtype="line", name="right railing",
-            point1="vtx_10.0_10.1_10000.0", point2="vtx_20.0_20.1_10000.0"
+            point1=f"vtx_10.0_10.1_{expected_ld}", point2=f"vtx_20.0_20.1_{expected_ld}"
         )
         assert mock_lc.return_value.add_load.call_count == 2
         mock_lc.return_value.add_load.assert_any_call("line_load_left railing")
@@ -635,11 +649,13 @@ class TestDeadLoads:
 
         bridge.create_median_load()
 
-        mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_vtx.assert_any_call(x=2.0, z=2.1, p=10000.0)
+        expected_ld = median_dead_load_kN_m() * 1000.0
+
+        mock_vtx.assert_any_call(x=1.0, z=1.1, p=pytest.approx(expected_ld))
+        mock_vtx.assert_any_call(x=2.0, z=2.1, p=pytest.approx(expected_ld))
         mock_ld.assert_called_once_with(
             loadtype="line", name="median",
-            point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0"
+            point1=f"vtx_1.0_1.1_{expected_ld}", point2=f"vtx_2.0_2.1_{expected_ld}"
         )
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
 
