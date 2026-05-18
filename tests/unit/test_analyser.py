@@ -510,69 +510,115 @@ class TestDeadLoads:
     def test_footpath_creates_correct_vertices_and_loads(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         mock_vtx.side_effect = lambda x, z, p: f"vtx_{x}_{z}_{p}"
-        mock_ld.return_value = "patch_load_obj"
+        mock_ld.side_effect = lambda **kwargs: f"patch_load_{kwargs['name']}"
         mock_lc.return_value = MagicMock()
         
-        bridge.layout.has_component.side_effect = lambda x: x == "footpath_left"
-        geom_patch_mock = MagicMock()
-        geom_patch_mock.p1.x, geom_patch_mock.p1.z = 1.0, 1.1
-        geom_patch_mock.p2.x, geom_patch_mock.p2.z = 2.0, 2.1
-        geom_patch_mock.p3.x, geom_patch_mock.p3.z = 3.0, 3.1
-        geom_patch_mock.p4.x, geom_patch_mock.p4.z = 4.0, 4.1
-        bridge.load_manager.footpath_load.return_value = geom_patch_mock
+        bridge.layout.has_component.side_effect = lambda x: x in ("footpath_left", "footpath_right")
+        
+        geom_left = MagicMock()
+        geom_left.p1.x, geom_left.p1.z = 1.0, 1.1
+        geom_left.p2.x, geom_left.p2.z = 2.0, 2.1
+        geom_left.p3.x, geom_left.p3.z = 3.0, 3.1
+        geom_left.p4.x, geom_left.p4.z = 4.0, 4.1
+
+        geom_right = MagicMock()
+        geom_right.p1.x, geom_right.p1.z = 10.0, 10.1
+        geom_right.p2.x, geom_right.p2.z = 20.0, 20.1
+        geom_right.p3.x, geom_right.p3.z = 30.0, 30.1
+        geom_right.p4.x, geom_right.p4.z = 40.0, 40.1
+
+        bridge.load_manager.footpath_load.side_effect = lambda side: geom_left if side == "left" else geom_right
 
         bridge.create_footpath_load()
 
         mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_ld.assert_called_once_with(
+        mock_vtx.assert_any_call(x=10.0, z=10.1, p=10000.0)
+
+        mock_ld.assert_any_call(
             loadtype="patch", name="left footpath",
             point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0",
             point3="vtx_3.0_3.1_10000.0", point4="vtx_4.0_4.1_10000.0"
         )
+        mock_ld.assert_any_call(
+            loadtype="patch", name="right footpath",
+            point1="vtx_10.0_10.1_10000.0", point2="vtx_20.0_20.1_10000.0",
+            point3="vtx_30.0_30.1_10000.0", point4="vtx_40.0_40.1_10000.0"
+        )
+        assert mock_lc.return_value.add_load.call_count == 2
+        mock_lc.return_value.add_load.assert_any_call("patch_load_left footpath")
+        mock_lc.return_value.add_load.assert_any_call("patch_load_right footpath")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
 
     def test_crash_barrier_creates_correct_vertices_and_loads(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         mock_vtx.side_effect = lambda x, z, p: f"vtx_{x}_{z}_{p}"
-        mock_ld.return_value = "line_load_obj"
+        mock_ld.side_effect = lambda **kwargs: f"line_load_{kwargs['name']}"
         mock_lc.return_value = MagicMock()
         
-        bridge.layout.has_component.side_effect = lambda x: x == "crash_barrier_left"
-        geom_line_mock = MagicMock()
-        geom_line_mock.start.x, geom_line_mock.start.z = 1.0, 1.1
-        geom_line_mock.end.x, geom_line_mock.end.z = 2.0, 2.1
-        bridge.load_manager.crash_barrier_load.return_value = geom_line_mock
+        bridge.layout.has_component.side_effect = lambda x: x in ("crash_barrier_left", "crash_barrier_right")
+        
+        geom_left = MagicMock()
+        geom_left.start.x, geom_left.start.z = 1.0, 1.1
+        geom_left.end.x, geom_left.end.z = 2.0, 2.1
+
+        geom_right = MagicMock()
+        geom_right.start.x, geom_right.start.z = 10.0, 10.1
+        geom_right.end.x, geom_right.end.z = 20.0, 20.1
+
+        bridge.load_manager.crash_barrier_load.side_effect = lambda side: geom_left if side == "left" else geom_right
 
         bridge.create_crash_barrier_load()
 
         mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_vtx.assert_any_call(x=2.0, z=2.1, p=10000.0)
-        mock_ld.assert_called_once_with(
+        mock_vtx.assert_any_call(x=10.0, z=10.1, p=10000.0)
+        
+        mock_ld.assert_any_call(
             loadtype="line", name="left crash barrier",
             point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0"
         )
+        mock_ld.assert_any_call(
+            loadtype="line", name="right crash barrier",
+            point1="vtx_10.0_10.1_10000.0", point2="vtx_20.0_20.1_10000.0"
+        )
+        assert mock_lc.return_value.add_load.call_count == 2
+        mock_lc.return_value.add_load.assert_any_call("line_load_left crash barrier")
+        mock_lc.return_value.add_load.assert_any_call("line_load_right crash barrier")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
 
     def test_railing_creates_correct_vertices_and_loads(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         mock_vtx.side_effect = lambda x, z, p: f"vtx_{x}_{z}_{p}"
-        mock_ld.return_value = "line_load_obj"
+        mock_ld.side_effect = lambda **kwargs: f"line_load_{kwargs['name']}"
         mock_lc.return_value = MagicMock()
         
-        bridge.layout.has_component.side_effect = lambda x: x == "railing_left"
-        geom_line_mock = MagicMock()
-        geom_line_mock.start.x, geom_line_mock.start.z = 1.0, 1.1
-        geom_line_mock.end.x, geom_line_mock.end.z = 2.0, 2.1
-        bridge.load_manager.railing_load.return_value = geom_line_mock
+        bridge.layout.has_component.side_effect = lambda x: x in ("railing_left", "railing_right")
+        
+        geom_left = MagicMock()
+        geom_left.start.x, geom_left.start.z = 1.0, 1.1
+        geom_left.end.x, geom_left.end.z = 2.0, 2.1
+
+        geom_right = MagicMock()
+        geom_right.start.x, geom_right.start.z = 10.0, 10.1
+        geom_right.end.x, geom_right.end.z = 20.0, 20.1
+
+        bridge.load_manager.railing_load.side_effect = lambda side: geom_left if side == "left" else geom_right
 
         bridge.create_railing_load()
 
         mock_vtx.assert_any_call(x=1.0, z=1.1, p=10000.0)
-        mock_vtx.assert_any_call(x=2.0, z=2.1, p=10000.0)
-        mock_ld.assert_called_once_with(
+        mock_vtx.assert_any_call(x=10.0, z=10.1, p=10000.0)
+        
+        mock_ld.assert_any_call(
             loadtype="line", name="left railing",
             point1="vtx_1.0_1.1_10000.0", point2="vtx_2.0_2.1_10000.0"
         )
+        mock_ld.assert_any_call(
+            loadtype="line", name="right railing",
+            point1="vtx_10.0_10.1_10000.0", point2="vtx_20.0_20.1_10000.0"
+        )
+        assert mock_lc.return_value.add_load.call_count == 2
+        mock_lc.return_value.add_load.assert_any_call("line_load_left railing")
+        mock_lc.return_value.add_load.assert_any_call("line_load_right railing")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
 
     def test_median_creates_correct_vertices_and_loads(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
