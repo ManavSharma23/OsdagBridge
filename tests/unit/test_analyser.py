@@ -13,12 +13,18 @@ from osdagbridge.core.bridge_types.plate_girder.dto import (
     DeckLayoutProperties
 )
 
-from osdagbridge.core.bridge_components.super_structure.plate_girder.geometry import girder_self_weight_kN_m
-from osdagbridge.core.bridge_components.super_structure.deck.geometry import slab_dead_load_kN_m2, wearing_course_dead_load_kN_m2
+from osdagbridge.core.bridge_components.super_structure.plate_girder.geometry import girder_self_weight_kN_m, STEEL_UNIT_WEIGHT_kN_m3
+from osdagbridge.core.bridge_components.super_structure.deck.geometry import slab_dead_load_kN_m2, wearing_course_dead_load_kN_m2, WET_CONCRETE_DENSITY_kN_m3
 from osdagbridge.core.bridge_components.super_structure.footpath.geometry import footpath_dead_load_kN_m2
 from osdagbridge.core.bridge_components.super_structure.crash_barrier.geometry import crash_barrier_dead_load_kN_m
 from osdagbridge.core.bridge_components.super_structure.railing.geometry import railing_dead_load_kN_m
 from osdagbridge.core.bridge_components.super_structure.median.geometry import median_dead_load_kN_m
+
+# Stash the real IRC6 impact-factor function at import time — before any @patch
+# decorator can replace it on the class.  Tests that need the real arithmetic
+# use this reference instead of IRC6_2017.cl_208_3_impact_factor (which is
+# replaced by a MagicMock for the duration of TestLiveLoad).
+_real_cl_208_3_impact_factor = IRC6_2017.cl_208_3_impact_factor
 
 @pytest.fixture
 def bridge():
@@ -83,26 +89,33 @@ class TestInit:
             "self_weight_load_case", "layout", "bridge_geometry", "load_manager"
         ]
         for attr in attrs:
-            assert getattr(bridge, attr, "MISSING") is None
+            val = getattr(bridge, attr, "MISSING")
+            assert val is None, (
+                f"__init__ must set '{attr}' to None, but got {val!r}"
+            )
 
     def test_vehicle_maps_are_empty_dicts(self, bridge):
-        assert bridge.vehicle_moving_loads_by_case == {}
-        assert bridge.vehicle_type_map == {}
+        assert bridge.vehicle_moving_loads_by_case == {}, (
+            f"vehicle_moving_loads_by_case should be empty dict, got {bridge.vehicle_moving_loads_by_case!r}"
+        )
+        assert bridge.vehicle_type_map == {}, (
+            f"vehicle_type_map should be empty dict, got {bridge.vehicle_type_map!r}"
+        )
 
     def test_model_is_none(self, bridge):
-        assert bridge.model is None
+        assert bridge.model is None, f"model should be None after __init__, got {bridge.model!r}"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.BridgeGeometry")
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.CrossSectionLayout")
 class TestSetGeometry:
     def test_geometry_values_stored(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         bridge.set_geometry(sample_geometry, sample_layout)
-        assert bridge.L == 33.5
-        assert bridge.n_l == 7
-        assert bridge.n_t == 11
-        assert bridge.edge_dist == 1.1
-        assert bridge.ext_to_int_dist == 2.2775
-        assert bridge.angle == 0
+        assert bridge.L == 33.5, f"L expected 33.5, got {bridge.L}"
+        assert bridge.n_l == 7, f"n_l expected 7, got {bridge.n_l}"
+        assert bridge.n_t == 11, f"n_t expected 11, got {bridge.n_t}"
+        assert bridge.edge_dist == 1.1, f"edge_dist expected 1.1, got {bridge.edge_dist}"
+        assert bridge.ext_to_int_dist == 2.2775, f"ext_to_int_dist expected 2.2775, got {bridge.ext_to_int_dist}"
+        assert bridge.angle == 0, f"angle expected 0, got {bridge.angle}"
 
     def test_cross_section_layout_called_with_correct_kwargs(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         bridge.set_geometry(sample_geometry, sample_layout)
@@ -118,11 +131,11 @@ class TestSetGeometry:
 
     def test_layout_stored_on_instance(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         bridge.set_geometry(sample_geometry, sample_layout)
-        assert bridge.layout == mock_layout.return_value
+        assert bridge.layout == mock_layout.return_value, "layout not stored on bridge instance after set_geometry()"
 
     def test_bridge_geometry_stored_on_instance(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         bridge.set_geometry(sample_geometry, sample_layout)
-        assert bridge.bridge_geometry == mock_bridge_geom.return_value
+        assert bridge.bridge_geometry == mock_bridge_geom.return_value, "bridge_geometry not stored on bridge instance after set_geometry()"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_section")
 class TestCreateSections:
@@ -131,21 +144,21 @@ class TestCreateSections:
             sample_sections["longitudinal"], sample_sections["edge_longitudinal"],
             sample_sections["transverse"], sample_sections["end_transverse"]
         )
-        assert mock_create_section.call_count == 4
+        assert mock_create_section.call_count == 4, f"og.create_section should be called 4 times, got {mock_create_section.call_count}"
 
     def test_longitudinal_props_stored(self, mock_create_section, bridge, sample_sections):
         bridge.create_sections(
             sample_sections["longitudinal"], sample_sections["edge_longitudinal"],
             sample_sections["transverse"], sample_sections["end_transverse"]
         )
-        assert bridge.longitudinal_props is sample_sections["longitudinal"]
+        assert bridge.longitudinal_props is sample_sections["longitudinal"], "longitudinal_props not stored correctly after create_sections()"
 
     def test_edge_longitudinal_props_stored(self, mock_create_section, bridge, sample_sections):
         bridge.create_sections(
             sample_sections["longitudinal"], sample_sections["edge_longitudinal"],
             sample_sections["transverse"], sample_sections["end_transverse"]
         )
-        assert bridge.edge_longitudinal_props is sample_sections["edge_longitudinal"]
+        assert bridge.edge_longitudinal_props is sample_sections["edge_longitudinal"], "edge_longitudinal_props not stored correctly after create_sections()"
 
     def test_transverse_section_has_unit_width_true(self, mock_create_section, bridge, sample_sections):
         bridge.create_sections(
@@ -153,23 +166,23 @@ class TestCreateSections:
             sample_sections["transverse"], sample_sections["end_transverse"]
         )
         calls_with_unit_width = [call for call in mock_create_section.call_args_list if call.kwargs.get("unit_width") is True]
-        assert len(calls_with_unit_width) == 1
+        assert len(calls_with_unit_width) == 1, f"Expected exactly 1 section with unit_width=True, got {len(calls_with_unit_width)}"
 
     def test_all_section_attributes_set_on_instance(self, mock_create_section, bridge, sample_sections):
         bridge.create_sections(
             sample_sections["longitudinal"], sample_sections["edge_longitudinal"],
             sample_sections["transverse"], sample_sections["end_transverse"]
         )
-        assert bridge.longitudinal_section is not None
-        assert bridge.edge_longitudinal_section is not None
-        assert bridge.transverse_section is not None
-        assert bridge.end_transverse_section is not None
+        assert bridge.longitudinal_section is not None, "longitudinal_section should not be None after create_sections()"
+        assert bridge.edge_longitudinal_section is not None, "edge_longitudinal_section should not be None after create_sections()"
+        assert bridge.transverse_section is not None, "transverse_section should not be None after create_sections()"
+        assert bridge.end_transverse_section is not None, "end_transverse_section should not be None after create_sections()"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_material")
 class TestCreateMaterial:
     def test_og_create_material_called_once(self, mock_create_material, bridge, sample_material):
         bridge.create_material(sample_material)
-        assert mock_create_material.call_count == 1
+        assert mock_create_material.call_count == 1, f"og.create_material should be called once, got {mock_create_material.call_count}"
 
     def test_material_called_with_steel_keyword(self, mock_create_material, bridge, sample_material):
         bridge.create_material(sample_material)
@@ -178,7 +191,7 @@ class TestCreateMaterial:
         for call in mock_create_material.call_args_list:
             if call.kwargs.get("material") == "steel":
                 found = True
-        assert found
+        assert found, "og.create_material was never called with material='steel'"
 
     def test_correct_properties_passed(self, mock_create_material, bridge, sample_material):
         bridge.create_material(sample_material)
@@ -186,11 +199,11 @@ class TestCreateMaterial:
         for call in mock_create_material.call_args_list:
             if call.kwargs.get("E") == 200e9 and call.kwargs.get("v") == 0.3 and call.kwargs.get("rho") == 78500.0:
                 found = True
-        assert found
+        assert found, "og.create_material was not called with expected E=200e9, v=0.3, rho=78500.0"
 
     def test_steel_custom_stored_on_instance(self, mock_create_material, bridge, sample_material):
         bridge.create_material(sample_material)
-        assert bridge.steel_custom == mock_create_material.return_value
+        assert bridge.steel_custom == mock_create_material.return_value, f"steel_custom not stored correctly, got {bridge.steel_custom!r}"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_member")
 class TestAssignMembers:
@@ -201,7 +214,7 @@ class TestAssignMembers:
         bridge.end_transverse_section = MagicMock()
         bridge.steel_custom = MagicMock()
         bridge.assign_members()
-        assert mock_create_member.call_count == 4
+        assert mock_create_member.call_count == 4, f"og.create_member should be called 4 times, got {mock_create_member.call_count}"
 
     def test_longitudinal_beam_stored(self, mock_create_member, bridge):
         bridge.longitudinal_section = MagicMock()
@@ -210,7 +223,7 @@ class TestAssignMembers:
         bridge.end_transverse_section = MagicMock()
         bridge.steel_custom = MagicMock()
         bridge.assign_members()
-        assert bridge.longitudinal_beam is not None
+        assert bridge.longitudinal_beam is not None, "longitudinal_beam should not be None after assign_members()"
 
     def test_edge_longitudinal_beam_stored(self, mock_create_member, bridge):
         bridge.longitudinal_section = MagicMock()
@@ -219,7 +232,7 @@ class TestAssignMembers:
         bridge.end_transverse_section = MagicMock()
         bridge.steel_custom = MagicMock()
         bridge.assign_members()
-        assert bridge.edge_longitudinal_beam is not None
+        assert bridge.edge_longitudinal_beam is not None, "edge_longitudinal_beam should not be None after assign_members()"
 
     def test_transverse_and_end_transverse_stored(self, mock_create_member, bridge):
         bridge.longitudinal_section = MagicMock()
@@ -228,8 +241,8 @@ class TestAssignMembers:
         bridge.end_transverse_section = MagicMock()
         bridge.steel_custom = MagicMock()
         bridge.assign_members()
-        assert bridge.transverse_slab is not None
-        assert bridge.end_transverse_slab is not None
+        assert bridge.transverse_slab is not None, "transverse_slab should not be None after assign_members()"
+        assert bridge.end_transverse_slab is not None, "end_transverse_slab should not be None after assign_members()"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.LoadPlacementManager")
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_grillage")
@@ -252,7 +265,7 @@ class TestCreateModel:
     def test_og_create_grillage_called_once(self, mock_create_grillage, mock_lpm, bridge):
         self._setup_bridge(bridge, edge_dist=1.1)
         bridge.create_model()
-        assert mock_create_grillage.call_count == 1
+        assert mock_create_grillage.call_count == 1, f"og.create_grillage should be called once, got {mock_create_grillage.call_count}"
 
     def test_grillage_called_with_correct_params(self, mock_create_grillage, mock_lpm, bridge):
         self._setup_bridge(bridge, edge_dist=1.1)
@@ -261,13 +274,13 @@ class TestCreateModel:
         for call in mock_create_grillage.call_args_list:
             if call.kwargs.get("long_dim") == 33.5 and call.kwargs.get("mesh_type") == "Oblique" and call.kwargs.get("num_long_grid") == 7 and call.kwargs.get("num_trans_grid") == 11:
                 found = True
-        assert found
+        assert found, "og.create_grillage not called with expected long_dim=33.5, mesh_type='Oblique', num_long_grid=7, num_trans_grid=11"
 
     def test_set_member_called_seven_times(self, mock_create_grillage, mock_lpm, bridge):
         self._setup_bridge(bridge, edge_dist=1.1)
         mock_model = mock_create_grillage.return_value
         bridge.create_model()
-        assert mock_model.set_member.call_count == 7
+        assert mock_model.set_member.call_count == 7, f"set_member should be called 7 times, got {mock_model.set_member.call_count}"
 
     def test_edge_beam_uses_edge_longitudinal_when_overhang_exists(self, mock_create_grillage, mock_lpm, bridge):
         self._setup_bridge(bridge, edge_dist=1.1)
@@ -280,6 +293,20 @@ class TestCreateModel:
         mock_model = mock_create_grillage.return_value
         bridge.create_model()
         mock_model.set_member.assert_any_call(bridge.longitudinal_beam, member="edge_beam")
+
+    def test_edge_beam_no_overhang_never_uses_edge_longitudinal_beam(self, mock_create_grillage, mock_lpm, bridge):
+        """When edge_dist=0 the code must fall into the else branch and use longitudinal_beam,
+        NOT edge_longitudinal_beam, for the edge_beam member.  This guards against someone
+        removing or inverting the `if self.edge_dist > 0` condition in create_model().
+        Uses object-identity comparison so the check is not fooled by string repr."""
+        self._setup_bridge(bridge, edge_dist=0)
+        mock_model = mock_create_grillage.return_value
+        bridge.create_model()
+        # Collect the first positional argument from every set_member() call
+        all_first_args = [c.args[0] for c in mock_model.set_member.call_args_list]
+        assert bridge.edge_longitudinal_beam not in all_first_args, (
+            "edge_longitudinal_beam was passed to set_member even though edge_dist=0"
+        )
 
     def test_create_osp_model_called_with_pyfile_false(self, mock_create_grillage, mock_lpm, bridge):
         self._setup_bridge(bridge, edge_dist=1.1)
@@ -350,7 +377,7 @@ class TestDeadLoads:
     def test_self_weight_load_case_stored_on_instance(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.create_self_weight_load()
-        assert bridge.self_weight_load_case is not None
+        assert bridge.self_weight_load_case is not None, "self_weight_load_case should not be None after create_self_weight_load()"
 
     def test_self_weight_load_case_has_correct_name(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
@@ -369,7 +396,7 @@ class TestDeadLoads:
     def test_deck_load_case_stored(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.create_deck_load(slab_thickness_m=0.200)
-        assert bridge.deck_load_case is not None
+        assert bridge.deck_load_case is not None, "deck_load_case should not be None after create_deck_load()"
 
     def test_deck_load_case_name(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
@@ -384,55 +411,55 @@ class TestDeadLoads:
     def test_wearing_course_stored(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.create_wearing_course_load(thickness_m=0.050)
-        assert bridge.wearing_course_load is not None
+        assert bridge.wearing_course_load is not None, "wearing_course_load should not be None after create_wearing_course_load()"
 
     def test_footpath_returns_none_and_warns_when_no_footpath_in_layout(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.return_value = False
         with pytest.warns(UserWarning):
-            assert bridge.create_footpath_load() is None
+            assert bridge.create_footpath_load() is None, "create_footpath_load() should return None and warn if footpath is not in layout"
 
     def test_footpath_load_case_stored_when_footpath_present(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.side_effect = lambda x: x in ("footpath_left", "footpath_right")
         bridge.create_footpath_load()
-        assert bridge.footpath_load_case is not None
+        assert bridge.footpath_load_case is not None, "footpath_load_case should not be None when footpath is in layout"
 
     def test_crash_barrier_returns_none_and_warns_when_not_in_layout(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.return_value = False
         with pytest.warns(UserWarning):
-            assert bridge.create_crash_barrier_load() is None
+            assert bridge.create_crash_barrier_load() is None, "create_crash_barrier_load() should return None and warn if crash barrier is not in layout"
 
     def test_crash_barrier_load_case_stored_when_present(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.side_effect = lambda x: x in ("crash_barrier_left", "crash_barrier_right")
         bridge.create_crash_barrier_load()
-        assert bridge.crash_barrier_load_case is not None
+        assert bridge.crash_barrier_load_case is not None, "crash_barrier_load_case should not be None when crash barrier is in layout"
 
     def test_railing_returns_none_and_warns_when_not_in_layout(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.return_value = False
         with pytest.warns(UserWarning):
-            assert bridge.create_railing_load() is None
+            assert bridge.create_railing_load() is None, "create_railing_load() should return None and warn if railing is not in layout"
 
     def test_railing_load_case_stored_when_present(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.side_effect = lambda x: x in ("railing_left", "railing_right")
         bridge.create_railing_load()
-        assert bridge.railing_load_case is not None
+        assert bridge.railing_load_case is not None, "railing_load_case should not be None when railing is in layout"
 
     def test_median_returns_none_and_warns_when_not_in_layout(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.return_value = False
         with pytest.warns(UserWarning):
-            assert bridge.create_median_load() is None
+            assert bridge.create_median_load() is None, "create_median_load() should return None and warn if median is not in layout"
 
     def test_median_load_case_stored_when_present(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
         bridge.layout.has_component.side_effect = lambda x: x == "median"
         bridge.create_median_load()
-        assert bridge.median_load_case is not None
+        assert bridge.median_load_case is not None, "median_load_case should not be None when median is in layout"
 
     def test_median_load_case_name(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
@@ -447,7 +474,7 @@ class TestDeadLoads:
         mock_lc.return_value = MagicMock()
         bridge.create_self_weight_load()
 
-        expected_ld = girder_self_weight_kN_m(1.025) * 1000.0
+        expected_ld = girder_self_weight_kN_m(1.025, STEEL_UNIT_WEIGHT_kN_m3) * 1000.0
         expected_ld_calls = []
         for z_pos in [2.0, 4.0, 6.0]:
             mock_vtx.assert_any_call(x=0, z=z_pos, p=pytest.approx(expected_ld))
@@ -458,8 +485,30 @@ class TestDeadLoads:
                 point2=f"vtx_33.5_{z_pos}_{expected_ld}"
             ))
         mock_ld.assert_has_calls(expected_ld_calls, any_order=True)
-        assert mock_lc.return_value.add_load.call_count == 3
+        assert mock_lc.return_value.add_load.call_count == 3, (
+            f"Self-weight: add_load should be called 3 times (one per interior beam), got {mock_lc.return_value.add_load.call_count}"
+        )
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
+
+    def test_self_weight_vertex_count_matches_interior_noz_positions(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
+        """og.create_load_vertex must be called exactly 2 × (len(noz) - 2) times — once
+        for start and once for end of each interior z position.  If the loop in
+        create_self_weight_load() changes (e.g. accidentally includes edge positions
+        or skips an interior beam), this count will diverge and the test fails."""
+        self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
+        mock_lc.return_value = MagicMock()
+        noz = bridge.model.Mesh_obj.noz  # [0.0, 2.0, 4.0, 6.0, 8.0]
+        interior_count = len(noz) - 2  # positions at indices 1..-2 → 3
+        bridge.create_self_weight_load()
+        # Two vertices per interior z-position (start_beam and end_beam)
+        assert mock_vtx.call_count == 2 * interior_count, (
+            f"Self-weight loop: expected {2 * interior_count} vertex calls (2 per interior beam), got {mock_vtx.call_count}; "
+            f"noz={list(noz)}, interior_count={interior_count}"
+        )
+        # One og.create_load call per interior z-position (one line load object)
+        assert mock_ld.call_count == interior_count, (
+            f"Self-weight loop: expected {interior_count} load calls (1 per interior beam), got {mock_ld.call_count}"
+        )
 
     def test_deck_load_creates_correct_vertices_and_loads(self, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder, mock_vtx, mock_ld, mock_lc, bridge):
         self._ready_bridge(bridge, mock_median, mock_railing, mock_crash, mock_footpath, mock_wearing, mock_slab, mock_girder)
@@ -476,7 +525,7 @@ class TestDeadLoads:
 
         bridge.create_deck_load(slab_thickness_m=0.2)
 
-        expected_ld = slab_dead_load_kN_m2(0.2) * 1000.0
+        expected_ld = slab_dead_load_kN_m2(0.2, WET_CONCRETE_DENSITY_kN_m3) * 1000.0
 
         mock_vtx.assert_any_call(x=1.0, z=1.1, p=pytest.approx(expected_ld))
         mock_vtx.assert_any_call(x=2.0, z=2.1, p=pytest.approx(expected_ld))
@@ -555,7 +604,9 @@ class TestDeadLoads:
             point1=f"vtx_10.0_10.1_{expected_ld}", point2=f"vtx_20.0_20.1_{expected_ld}",
             point3=f"vtx_30.0_30.1_{expected_ld}", point4=f"vtx_40.0_40.1_{expected_ld}"
         )
-        assert mock_lc.return_value.add_load.call_count == 2
+        assert mock_lc.return_value.add_load.call_count == 2, (
+            f"Footpath: expected 2 add_load calls (left + right), got {mock_lc.return_value.add_load.call_count}"
+        )
         mock_lc.return_value.add_load.assert_any_call("patch_load_left footpath")
         mock_lc.return_value.add_load.assert_any_call("patch_load_right footpath")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
@@ -593,7 +644,9 @@ class TestDeadLoads:
             loadtype="line", name="right crash barrier",
             point1=f"vtx_10.0_10.1_{expected_ld}", point2=f"vtx_20.0_20.1_{expected_ld}"
         )
-        assert mock_lc.return_value.add_load.call_count == 2
+        assert mock_lc.return_value.add_load.call_count == 2, (
+            f"Crash barrier: expected 2 add_load calls (left + right), got {mock_lc.return_value.add_load.call_count}"
+        )
         mock_lc.return_value.add_load.assert_any_call("line_load_left crash barrier")
         mock_lc.return_value.add_load.assert_any_call("line_load_right crash barrier")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
@@ -631,7 +684,9 @@ class TestDeadLoads:
             loadtype="line", name="right railing",
             point1=f"vtx_10.0_10.1_{expected_ld}", point2=f"vtx_20.0_20.1_{expected_ld}"
         )
-        assert mock_lc.return_value.add_load.call_count == 2
+        assert mock_lc.return_value.add_load.call_count == 2, (
+            f"Railing: expected 2 add_load calls (left + right), got {mock_lc.return_value.add_load.call_count}"
+        )
         mock_lc.return_value.add_load.assert_any_call("line_load_left railing")
         mock_lc.return_value.add_load.assert_any_call("line_load_right railing")
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
@@ -670,7 +725,7 @@ class TestDeadLoadCombination:
     def test_returns_none_and_warns_when_no_sub_cases_set(self, mock_lc, bridge):
         bridge.model = MagicMock()
         with pytest.warns(UserWarning):
-            assert bridge.create_dead_load_combination() is None
+            assert bridge.create_dead_load_combination() is None, "create_dead_load_combination() should return None and warn if no sub-cases are set"
 
     def test_combines_all_non_none_sub_cases(self, mock_lc, bridge):
         bridge.model = MagicMock()
@@ -684,8 +739,39 @@ class TestDeadLoadCombination:
         bridge.median_load_case = None
         
         result = bridge.create_dead_load_combination()
-        assert result is not None
-        assert bridge.dead_load_combination is not None
+        assert result is not None, "create_dead_load_combination() should return a value when sub-cases exist"
+        assert bridge.dead_load_combination is not None, "dead_load_combination attribute should be set after create_dead_load_combination()"
+
+    def test_dl_combination_load_count_matches_sub_cases(self, mock_lc, bridge):
+        """The number of loads added to DL_combined must equal the total number of
+        load_groups entries across all non-None sub-cases.  If create_dead_load_combination()
+        accidentally skips a sub-case or double-counts one, this count diverges."""
+        bridge.model = MagicMock()
+
+        # Build three sub-cases with known load counts (2 + 1 + 3 = 6 total)
+        def _make_lc(n_loads):
+            lc = MagicMock()
+            lc.load_groups = [{"load": MagicMock()} for _ in range(n_loads)]
+            return lc
+
+        bridge.self_weight_load_case = _make_lc(2)
+        bridge.deck_load_case = _make_lc(1)
+        bridge.crash_barrier_load_case = _make_lc(3)
+        bridge.footpath_load_case = None
+        bridge.railing_load_case = None
+        bridge.median_load_case = None
+
+        expected_total = 2 + 1 + 3  # sum of non-None sub-case load counts
+
+        # Capture what DL_combined.add_load is called with
+        mock_combined_lc = MagicMock()
+        mock_lc.return_value = mock_combined_lc
+
+        bridge.create_dead_load_combination()
+        assert mock_combined_lc.add_load.call_count == expected_total, (
+            f"Expected {expected_total} loads in DL_combined, "
+            f"got {mock_combined_lc.add_load.call_count}"
+        )
 
     def test_load_factor_passed_to_model(self, mock_lc, bridge):
         bridge.model = MagicMock()
@@ -722,18 +808,20 @@ class TestWindLoad:
     def test_returns_dict_with_four_keys(self, mock_lc, mock_ld, mock_wind):
         mock_wind.return_value = {"Pz": 500.0, "G": 2.0, "FT": 100000.0}
         result = self.bridge.create_wind_load(c_spacing=2.2775, d_depth=1.5, crash_barrier_height=1.0)
-        assert isinstance(result, dict)
-        assert set(result.keys()) == {"WL_T", "WL_L", "WL_V", "WL"}
+        assert isinstance(result, dict), f"create_wind_load should return a dict, got {type(result).__name__}"
+        assert set(result.keys()) == {"WL_T", "WL_L", "WL_V", "WL"}, (
+            f"Wind load dict should have keys {{WL_T, WL_L, WL_V, WL}}, got {set(result.keys())}"
+        )
 
     def test_wind_transverse_load_case_stored(self, mock_lc, mock_ld, mock_wind):
         mock_wind.return_value = {"Pz": 500.0, "G": 2.0, "FT": 100000.0}
         self.bridge.create_wind_load(c_spacing=2.2775, d_depth=1.5, crash_barrier_height=1.0)
-        assert self.bridge.wind_transverse_load_case is not None
+        assert self.bridge.wind_transverse_load_case is not None, "wind_transverse_load_case should not be None after create_wind_load()"
 
     def test_wind_longitudinal_load_case_stored(self, mock_lc, mock_ld, mock_wind):
         mock_wind.return_value = {"Pz": 500.0, "G": 2.0, "FT": 100000.0}
         self.bridge.create_wind_load(c_spacing=2.2775, d_depth=1.5, crash_barrier_height=1.0)
-        assert self.bridge.wind_longitudinal_load_case is not None
+        assert self.bridge.wind_longitudinal_load_case is not None, "wind_longitudinal_load_case should not be None after create_wind_load()"
 
     def test_wind_combined_registered_with_partial_safety_factor(self, mock_lc, mock_ld, mock_wind):
         mock_wind.return_value = {"Pz": 500.0, "G": 2.0, "FT": 100000.0}
@@ -778,9 +866,17 @@ class TestWindLoad:
         assert len(uplift_forces) > 0, "Uplift nodal load was not created"
 
         # Check exact calculated magnitude values and unit mappings
-        assert transverse_forces[0] == pytest.approx(25000.0, rel=1e-3)
-        assert longitudinal_forces[0] == pytest.approx(2838.541, rel=1e-3)
-        assert uplift_forces[0] == pytest.approx(-34232.812, rel=1e-3)
+        assert transverse_forces[0] == pytest.approx(25000.0, rel=1e-3), (
+            f"Wind transverse force expected ~25000.0 N, got {transverse_forces[0]}"
+        )
+        assert longitudinal_forces[0] == pytest.approx(2838.541, rel=1e-3), (
+            f"Wind longitudinal force expected ~2838.541 N, got {longitudinal_forces[0]}"
+        )
+        assert uplift_forces[0] == pytest.approx(-34232.812, rel=1e-3), (
+            f"Wind uplift force expected ~-34232.812 N, got {uplift_forces[0]}"
+        )
+
+
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_model")
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
@@ -800,8 +896,8 @@ class TestLiveLoad:
         mock_t6a.return_value = {"vehicle_combinations": [{"ClassA": 2}, {"Class70R": 1}]}
         self.bridge.layout.get_lane_transverse_coordinates.return_value = [1.75, 5.25]
         result = self.bridge.vehicle_lane_coordinates()
-        assert isinstance(result, list)
-        assert len(result) > 0
+        assert isinstance(result, list), f"vehicle_lane_coordinates should return a list, got {type(result).__name__}"
+        assert len(result) > 0, "vehicle_lane_coordinates returned an empty list — expected at least one combination"
 
     def test_case_num_increments_from_one(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
@@ -809,8 +905,8 @@ class TestLiveLoad:
         mock_t6a.return_value = {"vehicle_combinations": [{"ClassA": 2}, {"Class70R": 1}]}
         self.bridge.layout.get_lane_transverse_coordinates.return_value = [1.75, 5.25]
         result = self.bridge.vehicle_lane_coordinates()
-        assert result[0]["case_num"] == 1
-        assert result[1]["case_num"] == 2
+        assert result[0]["case_num"] == 1, f"First case_num should be 1, got {result[0]['case_num']}"
+        assert result[1]["case_num"] == 2, f"Second case_num should be 2, got {result[1]['case_num']}"
 
     def test_classA_assigned_one_lane_per_vehicle(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
@@ -821,7 +917,9 @@ class TestLiveLoad:
         for item in result:
             for v_name, coords in item.get("combinations", {}).items():
                 if v_name.startswith("ClassA"):
-                    assert len(coords) == 2
+                    assert len(coords) == 2, (
+                        f"ClassA vehicle '{v_name}' should occupy 2 lane positions, got {len(coords)}"
+                    )
 
     def test_class70R_z_coord_is_midpoint_of_two_lanes(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
@@ -838,17 +936,19 @@ class TestLiveLoad:
         for k, v in case.get("combinations", {}).items():
             if k.startswith("Class70R"):
                 z_coord = v[0][1]
-        assert z_coord == (1.75 + 5.25) / 2
+        assert z_coord == (1.75 + 5.25) / 2, (
+            f"Class70R z-coordinate should be midpoint of lanes = {(1.75 + 5.25) / 2}, got {z_coord}"
+        )
 
     def test_vehicle_length_class70r_returns_exact_length(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("Class70R")
-        assert isinstance(result, float)
-        assert result == pytest.approx(15.12, rel=1e-3)
+        assert isinstance(result, float), f"vehicle_length('Class70R') should return float, got {type(result).__name__}"
+        assert result == pytest.approx(15.12, rel=1e-3), f"Class70R length expected ~15.12 m, got {result}"
 
     def test_vehicle_length_classA_returns_exact_length(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("ClassA")
-        assert isinstance(result, float)
-        assert result == pytest.approx(20.3, rel=1e-3)
+        assert isinstance(result, float), f"vehicle_length('ClassA') should return float, got {type(result).__name__}"
+        assert result == pytest.approx(20.3, rel=1e-3), f"ClassA length expected ~20.3 m, got {result}"
 
     def test_split_carriageway_with_median_produces_lane_coords_from_both_sides(
         self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm
@@ -897,7 +997,7 @@ class TestLiveLoad:
 
     def test_vehicle_length_unknown_returns_25(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("SomethingUnknown")
-        assert result == 25.0
+        assert result == 25.0, f"Unknown vehicle type should default to 25.0 m, got {result}"
 
     def test_dla_applied_as_load_factor(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
@@ -908,6 +1008,39 @@ class TestLiveLoad:
         self.bridge.add_vehicle_load_cases_from_combinations()
         self.bridge.model.add_load_case.assert_called_with(mock_lc.return_value, load_factor=1.1)
 
+    def test_dla_uses_real_impact_factor_from_irc6(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
+        """DLA passed to add_load_case must equal 1.0 + IRC6_2017.cl_208_3_impact_factor(L)
+        computed with the real (unpatched) formula.  If anyone changes the formula or
+        omits the +1.0 offset in analyser.py, this test fails.
+
+        The class-level @patch replaces IRC6_2017.cl_208_3_impact_factor before this
+        method runs, so IRC6_2017.cl_208_3_impact_factor inside the method body would
+        already be a MagicMock (causing infinite recursion if used as side_effect).
+        _real_cl_208_3_impact_factor is captured at module import time — before any
+        patch — and is therefore the genuine, unpatched function.
+        """
+        # expected_dla computed with the REAL function, captured before any patching
+        expected_dla = 1.0 + _real_cl_208_3_impact_factor(33.5)
+
+        # Delegate the patched symbol back to the real function so analyser.py
+        # executes the actual IRC:6-2017 Cl.208.3 arithmetic
+        mock_impact.side_effect = _real_cl_208_3_impact_factor
+
+        self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
+        mock_t6.return_value = 2
+        mock_t6a.return_value = {"vehicle_combinations": [{"ClassA": 1}]}
+        carriageway_mock = MagicMock()
+        carriageway_mock.width = 7.0
+        carriageway_mock.z_start = 0.0
+        self.bridge.layout.get_component.return_value = carriageway_mock
+        mock_lc.return_value = MagicMock()
+
+        self.bridge.add_vehicle_load_cases_from_combinations()
+
+        self.bridge.model.add_load_case.assert_called_with(
+            mock_lc.return_value, load_factor=pytest.approx(expected_dla, rel=0.005)
+        )
+
     def test_vehicle_moving_loads_by_case_populated(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
         mock_t6.return_value = 2
@@ -915,7 +1048,7 @@ class TestLiveLoad:
         mock_impact.return_value = 0.1
         self.bridge.layout.get_lane_transverse_coordinates.return_value = [1.75, 5.25]
         self.bridge.add_vehicle_load_cases_from_combinations()
-        assert self.bridge.vehicle_moving_loads_by_case != {}
+        assert self.bridge.vehicle_moving_loads_by_case != {}, "vehicle_moving_loads_by_case should be populated after add_vehicle_load_cases_from_combinations()"
 
     def test_vehicle_type_map_populated(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
@@ -924,7 +1057,7 @@ class TestLiveLoad:
         mock_impact.return_value = 0.1
         self.bridge.layout.get_lane_transverse_coordinates.return_value = [1.75, 5.25]
         self.bridge.add_vehicle_load_cases_from_combinations()
-        assert self.bridge.vehicle_type_map != {}
+        assert self.bridge.vehicle_type_map != {}, "vehicle_type_map should be populated after add_vehicle_load_cases_from_combinations()"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_point")
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_moving_path")
@@ -946,7 +1079,9 @@ class TestMovingLoad:
         bridge.vehicle_type_map = {id(mock_vehicle_1): "ClassA", id(mock_vehicle_2): "ClassA"}
         bridge.L = 33.5
         bridge.create_moving_vehicle_load_cases()
-        assert len(bridge.moving_load_cases_list) == 2
+        assert len(bridge.moving_load_cases_list) == 2, (
+            f"Expected 2 moving load cases (one per combination), got {len(bridge.moving_load_cases_list)}"
+        )
 
     def test_path_start_is_negative_vehicle_length(self, mock_ml, mock_mp, mock_pt):
         bridge = BridgeGrillageModel()
@@ -964,7 +1099,7 @@ class TestMovingLoad:
             elif call.args and call.args[0] < 0:
                 neg_x_found = True
                 break
-        assert neg_x_found
+        assert neg_x_found, "Moving path should start at negative x (= −vehicle_length), but no negative x coord found in create_point calls"
 
     def test_moving_load_cases_list_stored(self, mock_ml, mock_mp, mock_pt):
         bridge = BridgeGrillageModel()
@@ -974,8 +1109,8 @@ class TestMovingLoad:
         bridge.vehicle_type_map = {id(mock_vehicle_1): "ClassA"}
         bridge.L = 33.5
         bridge.create_moving_vehicle_load_cases()
-        assert bridge.moving_load_cases_list is not None
-        assert len(bridge.moving_load_cases_list) > 0
+        assert bridge.moving_load_cases_list is not None, "moving_load_cases_list should not be None after create_moving_vehicle_load_cases()"
+        assert len(bridge.moving_load_cases_list) > 0, "moving_load_cases_list should contain at least one entry"
 
 class TestAnalyze:
     def test_raises_valueerror_when_model_is_none(self):
@@ -988,14 +1123,14 @@ class TestAnalyze:
         bridge = BridgeGrillageModel()
         bridge.model = MagicMock()
         bridge.analyze()
-        assert bridge.model.analyze.call_count == 1
+        assert bridge.model.analyze.call_count == 1, f"model.analyze() should be called once, got {bridge.model.analyze.call_count}"
 
     def test_returns_results_from_model_get_results(self):
         bridge = BridgeGrillageModel()
         bridge.model = MagicMock()
         bridge.model.get_results.return_value = "fake_results"
         result = bridge.analyze()
-        assert result == "fake_results"
+        assert result == "fake_results", f"analyze() should return model.get_results(), got {result!r}"
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.PlateGirderAnalysisResults")
 class TestResultHandler:
@@ -1009,7 +1144,7 @@ class TestResultHandler:
     def test_result_handler_created_once(self, mock_handler):
         results = self.bridge.analyze()
         mock_handler(dataset=results, bridge=self.bridge, edge_dist=self.bridge.edge_dist)
-        assert mock_handler.call_count == 1
+        assert mock_handler.call_count == 1, f"PlateGirderAnalysisResults should be instantiated once, got {mock_handler.call_count}"
 
     def test_correct_dataset_passed(self, mock_handler):
         results = self.bridge.analyze()
@@ -1031,7 +1166,9 @@ class TestResultHandler:
         mock_instance = MagicMock()
         mock_handler.return_value = mock_instance
         mock_instance.run_interactive_viewer()
-        assert mock_instance.run_interactive_viewer.call_count == 1
+        assert mock_instance.run_interactive_viewer.call_count == 1, (
+            f"run_interactive_viewer should be called once, got {mock_instance.run_interactive_viewer.call_count}"
+        )
 
     def test_viewer_called_with_no_arguments(self, mock_handler):
         mock_instance = MagicMock()
@@ -1130,10 +1267,14 @@ class TestPlot:
         bridge.plot()
 
         # get_results() called twice: once with no args, once with load_case=[]
-        assert bridge.model.get_results.call_count == 2
+        assert bridge.model.get_results.call_count == 2, (
+            f"plot() should call model.get_results() twice (general + load-case-specific), got {bridge.model.get_results.call_count}"
+        )
         first_call_kwargs = bridge.model.get_results.call_args_list[1]
         # Second call must include 'Deck slab load' as the load case
-        assert first_call_kwargs == call(load_case=['Deck slab load'])
+        assert first_call_kwargs == call(load_case=['Deck slab load']), (
+            f"Second get_results() call should use load_case=['Deck slab load'], got {first_call_kwargs}"
+        )
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
 class TestCreateGoverningLLLoadCase:
@@ -1151,8 +1292,8 @@ class TestCreateGoverningLLLoadCase:
         dataset.coords = {"Loadcase": MagicMock(values=[])}
         with pytest.warns(UserWarning, match="No vehicle static load cases found"):
             res = bridge.create_governing_ll_load_case(dataset)
-            assert res == dataset
-            assert bridge.ll_load_case is None
+            assert res == dataset, "When no static load cases, create_governing_ll_load_case should return the original dataset"
+            assert bridge.ll_load_case is None, "ll_load_case should remain None when no static load cases found"
 
     def test_governing_ll_load_case_creation_flow(self, mock_lc):
         bridge = BridgeGrillageModel()
@@ -1188,9 +1329,11 @@ class TestCreateGoverningLLLoadCase:
         mock_lc.assert_called_with(name="1.5 LL")
         mock_uls_lc.add_load.assert_called_once_with("load_obj_1")
         bridge.model.add_load_case.assert_called_once_with(mock_uls_lc, load_factor=1.5)
-        assert bridge.ll_load_case == mock_uls_lc
-        assert bridge.governing_ll_name == "case 1"
-        assert bridge.model.analyze.call_count == 1
+        assert bridge.ll_load_case == mock_uls_lc, f"ll_load_case should be the ULS load case object, got {bridge.ll_load_case!r}"
+        assert bridge.governing_ll_name == "case 1", f"governing_ll_name should be 'case 1', got {bridge.governing_ll_name!r}"
+        assert bridge.model.analyze.call_count == 1, (
+            f"model.analyze() should be called once after adding LL, got {bridge.model.analyze.call_count}"
+        )
 
 
 @patch("osdagbridge.core.bridge_types.plate_girder.analyser.og.create_load_case")
@@ -1236,7 +1379,7 @@ class TestCreateVehicleLoadCases:
 
         self.bridge.create_vehicle_load_cases()
 
-        assert mock_lc.call_count == 1
+        assert mock_lc.call_count == 1, f"Expected 1 og.create_load_case call for 1 combination, got {mock_lc.call_count}"
 
     def test_load_case_name_reflects_combination(self, mock_t6, mock_t6a, mock_lm, mock_lc):
         """Load case name must follow format 'Case{n} {k}x{vehicle_type}'."""
@@ -1246,7 +1389,7 @@ class TestCreateVehicleLoadCases:
         self.bridge.create_vehicle_load_cases()
 
         name_used = mock_lc.call_args_list[0].kwargs["name"]
-        assert name_used == "Case1 2xClassA"
+        assert name_used == "Case1 2xClassA", f"Load case name should be 'Case1 2xClassA', got {name_used!r}"
 
     def test_vehicle_placed_at_correct_z_coordinate(self, mock_t6, mock_t6a, mock_lm, mock_lc):
         """Each vehicle must be placed at z = z_start + (i+0.5) * lane_width from IRC table_6."""
@@ -1267,7 +1410,9 @@ class TestCreateVehicleLoadCases:
         expected_z_coords = [z_start + (i + 0.5) * lane_width for i in range(n_lanes)]
 
         actual_z_coords = [c.args[0].z for c in set_coord_calls]
-        assert sorted(actual_z_coords) == pytest.approx(sorted(expected_z_coords))
+        assert sorted(actual_z_coords) == pytest.approx(sorted(expected_z_coords)), (
+            f"Vehicle placed at incorrect Z-coordinates. Expected: {expected_z_coords}, Got: {actual_z_coords}"
+        )
 
     def test_vehicle_x_coord_is_zero(self, mock_t6, mock_t6a, mock_lm, mock_lc):
         """Vehicles always start at x=0 (longitudinal start of bridge)."""
@@ -1279,7 +1424,7 @@ class TestCreateVehicleLoadCases:
         self.bridge.create_vehicle_load_cases()
 
         for c in mock_vehicle.set_global_coord.call_args_list:
-            assert c.args[0].x == pytest.approx(0.0)
+            assert c.args[0].x == pytest.approx(0.0), f"Vehicle x-coordinate should be 0.0, got {c.args[0].x}"
 
     def test_each_load_case_added_to_model(self, mock_t6, mock_t6a, mock_lm, mock_lc):
         """Each created load case must be added to self.model exactly once."""
@@ -1295,7 +1440,9 @@ class TestCreateVehicleLoadCases:
 
         self.bridge.create_vehicle_load_cases()
 
-        assert self.bridge.model.add_load_case.call_count == 2
+        assert self.bridge.model.add_load_case.call_count == 2, (
+            f"Expected 2 add_load_case calls for 2 combinations, got {self.bridge.model.add_load_case.call_count}"
+        )
 
     def test_vehicle_load_cases_list_stored_on_instance(self, mock_t6, mock_t6a, mock_lm, mock_lc):
         """All created load cases must be stored in self.vehicle_load_cases_list."""
@@ -1310,15 +1457,26 @@ class TestCreateVehicleLoadCases:
 
         result = self.bridge.create_vehicle_load_cases()
 
-        assert hasattr(self.bridge, "vehicle_load_cases_list")
-        assert len(self.bridge.vehicle_load_cases_list) == 2
-        assert self.bridge.vehicle_load_cases_list == result
+        assert hasattr(self.bridge, "vehicle_load_cases_list"), "vehicle_load_cases_list attribute missing after create_vehicle_load_cases()"
+        assert len(self.bridge.vehicle_load_cases_list) == 2, (
+            f"vehicle_load_cases_list should have 2 entries, got {len(self.bridge.vehicle_load_cases_list)}"
+        )
+        assert self.bridge.vehicle_load_cases_list == result, "vehicle_load_cases_list should equal the return value of create_vehicle_load_cases()"
 
     def test_create_load_model_called_with_uppercase_vehicle_type(self, mock_t6, mock_t6a, mock_lm, mock_lc):
-        """og.create_load_model must be called with model_type=vehicle_type.upper()."""
+        """og.create_load_model must be called with a model_type that is all-uppercase.
+        Uses a .upper() self-check so the assertion is not tied to a specific vehicle
+        name: if analyser.py drops .upper(), the received value will differ from its
+        own .upper() and the test fails regardless of vehicle type.
+        """
         self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=1, cw_width=3.5, z_start=0.0)
         mock_lc.return_value = MagicMock()
 
         self.bridge.create_vehicle_load_cases()
 
-        mock_lm.assert_called_once_with(model_type="CLASSA")
+        assert mock_lm.call_count >= 1, "og.create_load_model was never called"
+        for c in mock_lm.call_args_list:
+            model_type = c.kwargs.get("model_type") or (c.args[0] if c.args else "")
+            assert model_type == model_type.upper(), (
+                f"model_type '{model_type}' was not uppercased — .upper() may have been removed from analyser.py"
+            )
