@@ -110,24 +110,28 @@ class TestInit:
 class TestSetGeometry:
     def test_geometry_values_stored(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         bridge.set_geometry(sample_geometry, sample_layout)
-        assert bridge.L == 33.5, f"L expected 33.5, got {bridge.L}"
-        assert bridge.n_l == 7, f"n_l expected 7, got {bridge.n_l}"
-        assert bridge.n_t == 11, f"n_t expected 11, got {bridge.n_t}"
-        assert bridge.edge_dist == 1.1, f"edge_dist expected 1.1, got {bridge.edge_dist}"
-        assert bridge.ext_to_int_dist == 2.2775, f"ext_to_int_dist expected 2.2775, got {bridge.ext_to_int_dist}"
-        assert bridge.angle == 0, f"angle expected 0, got {bridge.angle}"
+        assert bridge.L == sample_geometry.L, f"L expected {sample_geometry.L}, got {bridge.L}"
+        assert bridge.n_l == sample_geometry.n_l, f"n_l expected {sample_geometry.n_l}, got {bridge.n_l}"
+        assert bridge.n_t == sample_geometry.n_t, f"n_t expected {sample_geometry.n_t}, got {bridge.n_t}"
+        assert bridge.edge_dist == sample_geometry.edge_dist, f"edge_dist expected {sample_geometry.edge_dist}, got {bridge.edge_dist}"
+        assert bridge.ext_to_int_dist == sample_geometry.ext_to_int_dist, f"ext_to_int_dist expected {sample_geometry.ext_to_int_dist}, got {bridge.ext_to_int_dist}"
+        assert bridge.angle == sample_geometry.angle, f"angle expected {sample_geometry.angle}, got {bridge.angle}"
 
     def test_cross_section_layout_called_with_correct_kwargs(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         bridge.set_geometry(sample_geometry, sample_layout)
         mock_layout.assert_called_once_with(
-            carriageway_width=7.0, crash_barrier_width=0.45,
-            footpath_width=1.50, railing_width=0.30, median_width=1.0, n_footpaths=2
+            carriageway_width=sample_layout.carriageway_width,
+            crash_barrier_width=sample_layout.crash_barrier_width,
+            footpath_width=sample_layout.footpath_width,
+            railing_width=sample_layout.railing_width,
+            median_width=sample_layout.median_width,
+            n_footpaths=sample_layout.n_footpaths
         )
 
     def test_bridge_geometry_called_with_span_and_width(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         mock_layout.return_value.total_width = 12.0
         bridge.set_geometry(sample_geometry, sample_layout)
-        mock_bridge_geom.assert_called_with(span=33.5, width=12.0)
+        mock_bridge_geom.assert_called_with(span=sample_geometry.L, width=12.0)
 
     def test_layout_stored_on_instance(self, mock_layout, mock_bridge_geom, bridge, sample_geometry, sample_layout):
         bridge.set_geometry(sample_geometry, sample_layout)
@@ -197,9 +201,13 @@ class TestCreateMaterial:
         bridge.create_material(sample_material)
         found = False
         for call in mock_create_material.call_args_list:
-            if call.kwargs.get("E") == 200e9 and call.kwargs.get("v") == 0.3 and call.kwargs.get("rho") == 78500.0:
+            if (
+                call.kwargs.get("E") == sample_material.steel_prop.E
+                and call.kwargs.get("v") == sample_material.steel_prop.v
+                and call.kwargs.get("rho") == sample_material.steel_prop.rho
+            ):
                 found = True
-        assert found, "og.create_material was not called with expected E=200e9, v=0.3, rho=78500.0"
+        assert found, f"og.create_material was not called with expected E={sample_material.steel_prop.E}, v={sample_material.steel_prop.v}, rho={sample_material.steel_prop.rho}"
 
     def test_steel_custom_stored_on_instance(self, mock_create_material, bridge, sample_material):
         bridge.create_material(sample_material)
@@ -272,9 +280,14 @@ class TestCreateModel:
         bridge.create_model()
         found = False
         for call in mock_create_grillage.call_args_list:
-            if call.kwargs.get("long_dim") == 33.5 and call.kwargs.get("mesh_type") == "Oblique" and call.kwargs.get("num_long_grid") == 7 and call.kwargs.get("num_trans_grid") == 11:
+            if (
+                call.kwargs.get("long_dim") == bridge.L
+                and call.kwargs.get("mesh_type") == "Oblique"
+                and call.kwargs.get("num_long_grid") == bridge.n_l
+                and call.kwargs.get("num_trans_grid") == bridge.n_t
+            ):
                 found = True
-        assert found, "og.create_grillage not called with expected long_dim=33.5, mesh_type='Oblique', num_long_grid=7, num_trans_grid=11"
+        assert found, f"og.create_grillage not called with expected long_dim={bridge.L}, mesh_type='Oblique', num_long_grid={bridge.n_l}, num_trans_grid={bridge.n_t}"
 
     def test_set_member_called_seven_times(self, mock_create_grillage, mock_lpm, bridge):
         self._setup_bridge(bridge, edge_dist=1.1)
@@ -476,17 +489,19 @@ class TestDeadLoads:
 
         expected_ld = girder_self_weight_kN_m(1.025, STEEL_UNIT_WEIGHT_kN_m3) * 1000.0
         expected_ld_calls = []
-        for z_pos in [2.0, 4.0, 6.0]:
+        expected_z_positions = bridge.model.Mesh_obj.noz[1:-1]
+        for z_pos in expected_z_positions:
             mock_vtx.assert_any_call(x=0, z=z_pos, p=pytest.approx(expected_ld))
-            mock_vtx.assert_any_call(x=33.5, z=z_pos, p=pytest.approx(expected_ld))
+            mock_vtx.assert_any_call(x=bridge.L, z=z_pos, p=pytest.approx(expected_ld))
             expected_ld_calls.append(call(
                 loadtype="line",
                 point1=f"vtx_0_{z_pos}_{expected_ld}",
-                point2=f"vtx_33.5_{z_pos}_{expected_ld}"
+                point2=f"vtx_{bridge.L}_{z_pos}_{expected_ld}"
             ))
         mock_ld.assert_has_calls(expected_ld_calls, any_order=True)
-        assert mock_lc.return_value.add_load.call_count == 3, (
-            f"Self-weight: add_load should be called 3 times (one per interior beam), got {mock_lc.return_value.add_load.call_count}"
+        expected_call_count = len(bridge.model.Mesh_obj.noz) - 2
+        assert mock_lc.return_value.add_load.call_count == expected_call_count, (
+            f"Self-weight: add_load should be called {expected_call_count} times (one per interior beam), got {mock_lc.return_value.add_load.call_count}"
         )
         bridge.model.add_load_case.assert_called_once_with(mock_lc.return_value)
 
@@ -761,7 +776,11 @@ class TestDeadLoadCombination:
         bridge.railing_load_case = None
         bridge.median_load_case = None
 
-        expected_total = 2 + 1 + 3  # sum of non-None sub-case load counts
+        expected_total = sum(
+            len(lc.load_groups)
+            for lc in [bridge.self_weight_load_case, bridge.deck_load_case, bridge.crash_barrier_load_case]
+            if lc is not None
+        )
 
         # Capture what DL_combined.add_load is called with
         mock_combined_lc = MagicMock()
@@ -836,6 +855,32 @@ class TestWindLoad:
     def test_wind_load_calculates_correct_forces_and_nodal_loads(self, mock_lc, mock_ld, mock_wind):
         mock_wind.return_value = {"Pz": 500.0, "G": 2.0, "FT": 100000.0}
         
+        # Calculate expected values mathematically from the mock inputs:
+        FT = 100000.0
+        span = self.bridge.L
+        width = self.bridge.w
+        Pz = 500.0
+        G = 2.0
+        CL = 0.75
+        
+        nox = self.bridge.model.Mesh_obj.nox
+        noz = self.bridge.model.Mesh_obj.noz
+        
+        # Node 1 coordinate is [0.0, 0.0, 1.1]
+        # trib_x for x=0.0 in [0.0, 16.75, 33.5] is (16.75 - 0.0) / 2 = 8.375
+        trib_x = (nox[1] - nox[0]) / 2
+        # trib_z for z=1.1 in [0.0, 1.1, 10.9, 12.0] is (1.1 - 0.0) / 2 + (10.9 - 1.1) / 2 = 5.45
+        trib_z = ((noz[1] - noz[0]) / 2) + ((noz[2] - noz[1]) / 2)
+        trib_area = trib_x * trib_z
+        
+        FT_per_m = FT / span
+        FL_per_m2 = (0.25 * FT) / (span * width)
+        FV_per_m2 = Pz * G * CL
+        
+        expected_fz = FT_per_m * trib_x
+        expected_fx = FL_per_m2 * trib_area
+        expected_fy = -FV_per_m2 * trib_area
+
         mock_deck = MagicMock()
         mock_deck.p1.x, mock_deck.p1.z = 0.0, 0.0
         mock_deck.p2.x, mock_deck.p2.z = 33.5, 0.0
@@ -866,14 +911,14 @@ class TestWindLoad:
         assert len(uplift_forces) > 0, "Uplift nodal load was not created"
 
         # Check exact calculated magnitude values and unit mappings
-        assert transverse_forces[0] == pytest.approx(25000.0, rel=1e-3), (
-            f"Wind transverse force expected ~25000.0 N, got {transverse_forces[0]}"
+        assert transverse_forces[0] == pytest.approx(expected_fz, rel=1e-3), (
+            f"Wind transverse force expected ~{expected_fz} N, got {transverse_forces[0]}"
         )
-        assert longitudinal_forces[0] == pytest.approx(2838.541, rel=1e-3), (
-            f"Wind longitudinal force expected ~2838.541 N, got {longitudinal_forces[0]}"
+        assert longitudinal_forces[0] == pytest.approx(expected_fx, rel=1e-3), (
+            f"Wind longitudinal force expected ~{expected_fx} N, got {longitudinal_forces[0]}"
         )
-        assert uplift_forces[0] == pytest.approx(-34232.812, rel=1e-3), (
-            f"Wind uplift force expected ~-34232.812 N, got {uplift_forces[0]}"
+        assert uplift_forces[0] == pytest.approx(expected_fy, rel=1e-3), (
+            f"Wind uplift force expected ~{expected_fy} N, got {uplift_forces[0]}"
         )
 
 
@@ -923,7 +968,8 @@ class TestLiveLoad:
 
     def test_class70R_z_coord_is_midpoint_of_two_lanes(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         self.bridge.layout.has_component.side_effect = lambda x: x == "carriageway"
-        mock_t6.return_value = 2
+        n_lanes = 2
+        mock_t6.return_value = n_lanes
         mock_t6a.return_value = {"vehicle_combinations": [{"Class70R": 1}]}
         carriageway_mock = MagicMock()
         carriageway_mock.z_start = 0.0
@@ -936,19 +982,25 @@ class TestLiveLoad:
         for k, v in case.get("combinations", {}).items():
             if k.startswith("Class70R"):
                 z_coord = v[0][1]
-        assert z_coord == (1.75 + 5.25) / 2, (
-            f"Class70R z-coordinate should be midpoint of lanes = {(1.75 + 5.25) / 2}, got {z_coord}"
+        lane_width = carriageway_mock.width / n_lanes
+        z0 = carriageway_mock.z_start + 0.5 * lane_width
+        z1 = carriageway_mock.z_start + 1.5 * lane_width
+        expected_z = (z0 + z1) / 2
+        assert z_coord == expected_z, (
+            f"Class70R z-coordinate should be midpoint of lanes = {expected_z}, got {z_coord}"
         )
 
     def test_vehicle_length_class70r_returns_exact_length(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("Class70R")
         assert isinstance(result, float), f"vehicle_length('Class70R') should return float, got {type(result).__name__}"
-        assert result == pytest.approx(15.12, rel=1e-3), f"Class70R length expected ~15.12 m, got {result}"
+        expected_length = max(IRC6_2017.cl_204_1_Class70R_vehicle_wheel()['x'])
+        assert result == pytest.approx(expected_length, rel=1e-3), f"Class70R length expected ~{expected_length} m, got {result}"
 
     def test_vehicle_length_classA_returns_exact_length(self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm):
         result = BridgeGrillageModel._vehicle_length("ClassA")
         assert isinstance(result, float), f"vehicle_length('ClassA') should return float, got {type(result).__name__}"
-        assert result == pytest.approx(20.3, rel=1e-3), f"ClassA length expected ~20.3 m, got {result}"
+        expected_length = max(IRC6_2017.cl_204_1_ClassA_vehicle()['x'])
+        assert result == pytest.approx(expected_length, rel=1e-3), f"ClassA length expected ~{expected_length} m, got {result}"
 
     def test_split_carriageway_with_median_produces_lane_coords_from_both_sides(
         self, mock_t6, mock_t6a, mock_impact, mock_lc, mock_lm
@@ -1154,13 +1206,13 @@ class TestResultHandler:
     def test_correct_bridge_instance_passed(self, mock_handler):
         results = self.bridge.analyze()
         mock_handler(dataset=results, bridge=self.bridge, edge_dist=self.bridge.edge_dist)
-        mock_handler.assert_called_with(dataset=results, bridge=self.bridge, edge_dist=1.1)
+        mock_handler.assert_called_with(dataset=results, bridge=self.bridge, edge_dist=self.bridge.edge_dist)
 
     def test_correct_edge_dist_passed(self, mock_handler):
         self.bridge.edge_dist = 1.1
         results = self.bridge.analyze()
         mock_handler(dataset=results, bridge=self.bridge, edge_dist=self.bridge.edge_dist)
-        mock_handler.assert_called_with(dataset=results, bridge=self.bridge, edge_dist=1.1)
+        mock_handler.assert_called_with(dataset=results, bridge=self.bridge, edge_dist=self.bridge.edge_dist)
 
     def test_run_interactive_viewer_called_once(self, mock_handler):
         mock_instance = MagicMock()
@@ -1383,13 +1435,15 @@ class TestCreateVehicleLoadCases:
 
     def test_load_case_name_reflects_combination(self, mock_t6, mock_t6a, mock_lm, mock_lc):
         """Load case name must follow format 'Case{n} {k}x{vehicle_type}'."""
-        self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=2, cw_width=7.0)
+        n_lanes = 2
+        self._setup_single_carriageway(mock_t6, mock_t6a, n_lanes=n_lanes, cw_width=7.0)
         mock_lc.return_value = MagicMock()
 
         self.bridge.create_vehicle_load_cases()
 
         name_used = mock_lc.call_args_list[0].kwargs["name"]
-        assert name_used == "Case1 2xClassA", f"Load case name should be 'Case1 2xClassA', got {name_used!r}"
+        expected_name = f"Case1 {n_lanes}xClassA"
+        assert name_used == expected_name, f"Load case name should be {expected_name!r}, got {name_used!r}"
 
     def test_vehicle_placed_at_correct_z_coordinate(self, mock_t6, mock_t6a, mock_lm, mock_lc):
         """Each vehicle must be placed at z = z_start + (i+0.5) * lane_width from IRC table_6."""
