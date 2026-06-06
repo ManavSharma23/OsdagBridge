@@ -3,11 +3,9 @@ from collections import defaultdict
 
 _bridge_results = []   # module-level list, reset each run
 
-
 def pytest_configure(config):
     global _bridge_results
     _bridge_results = []
-
 
 def pytest_runtest_logreport(report):
     if report.when != "call":
@@ -34,7 +32,6 @@ def pytest_runtest_logreport(report):
         "status":    report.outcome,
         "reason":    failure_reason,
     })
-
 
 # ── Human-readable format description shown once per group ──────────────────
 HEADERS = {
@@ -101,7 +98,6 @@ HEADERS = {
     ),
 }
 
-
 def _fmt(test_name: str, raw: str) -> str:
     """Convert raw pytest param-id string into a labelled, human-readable line."""
     parts = raw.split("-")
@@ -116,65 +112,21 @@ def _fmt(test_name: str, raw: str) -> str:
         return "ERROR" if _clean(v) == "true" else "OK"
 
     def _unit(v: str, unit: str) -> str:
+        # pyrefly: ignore [unnecessary-type-conversion]
         clean_val = str(v).strip()
         if clean_val.lower() in ("none", "null"):
             return "None"
         return f"{clean_val}{unit}"
 
     try:
-        def _span_reason(val_str: str) -> str:
-            if val_str.startswith("value") or val_str in ("None", "", "abc", "(type-error: list)", "(type-error: dict)"):
-                return " (type error)"
-            try:
-                val = float(val_str)
-                if val < 20.0:
-                    return " (span < 20.0)"
-                if val > 45.0:
-                    return " (span > 45.0)"
-            except ValueError:
-                return " (type error)"
-            return ""
-
-        def _cw_reason(median: str, width_str: str) -> str:
-            if width_str in ("None", "", "abc") or "value" in width_str:
-                return " (type error)"
-            try:
-                w = float(width_str)
-                if w > 23.6:
-                    return " (width > 23.6)"
-                if median == "Yes" and w < 7.5:
-                    return " (width < 7.5 with median)"
-                if median == "No" and w < 4.25:
-                    return " (width < 4.25 without median)"
-            except ValueError:
-                return " (type error)"
-            return ""
-
-        def _skew_reason(val_str: str) -> str:
-            if val_str in ("None", "", "abc") or "value" in val_str:
-                return " (type error)"
-            try:
-                val = float(val_str)
-                if val < -15.0:
-                    return " (angle < -15.0)"
-                if val > 15.0:
-                    return " (angle > 15.0)"
-            except ValueError:
-                return " (type error)"
-            return ""
-
         if test_name == "test_validate_span":
             # format: <value>-<True/False>   (value may be negative)
             val = "-".join(parts[:-1])
-            is_valid = _clean(parts[-1]) == "true"
-            exp = "VALID" if is_valid else "INVALID"
-            if not is_valid:
-                exp += _span_reason(val)
             if val == "value70":
                 val = "(type-error: list)"
             elif val == "value71":
                 val = "(type-error: dict)"
-            return f"span={val}  |  expect={exp}"
+            return f"span={val}  |  expect={_bool(parts[-1])}"
 
         if test_name == "test_validate_carriageway_width":
             # format: <median>-<lanes>-<width>-<True/False>
@@ -182,31 +134,20 @@ def _fmt(test_name: str, raw: str) -> str:
                 median = parts[0]
                 lanes  = parts[1]
                 width  = "-".join(parts[2:-1])
-                is_valid = _clean(parts[-1]) == "true"
-                exp = "VALID" if is_valid else "INVALID"
-                if not is_valid:
-                    exp += _cw_reason(median, width)
                 return (f"median={median}  |  lanes={lanes}  |  "
-                        f"width={width}m  |  expect={exp}")
+                        f"width={width}m  |  expect={_bool(parts[-1])}")
 
         if test_name == "test_validate_skew_angle":
             # format: <value>-<True/False>   (value may be negative)
             val = "-".join(parts[:-1])
-            is_valid = _clean(parts[-1]) == "true"
-            exp = "VALID" if is_valid else "INVALID"
-            if not is_valid:
-                exp += _skew_reason(val)
-            return f"angle={val}°  |  expect={exp}"
+            return f"angle={val}°  |  expect={_bool(parts[-1])}"
 
         if test_name == "test_validate_layout_equation":
             # format: <overall_w>-<girders>-<spacing>-<overhang>-<True/False>
             if len(parts) == 5:
                 ow, g, sp, oh, err_raw = parts
-                exp = _err(err_raw)
-                if _clean(err_raw) == "true":
-                    exp += " (overall_w != (girders-1)*spacing + 2*overhang)"
                 return (f"overall_w={ow}m  |  girders={g}  |  "
-                        f"spacing={sp}m  |  overhang={oh}m  |  expect={exp}")
+                        f"spacing={sp}m  |  overhang={oh}m  |  expect={_err(err_raw)}")
 
         if test_name in (
             "test_validate_kerb_width",
@@ -217,13 +158,6 @@ def _fmt(test_name: str, raw: str) -> str:
             if len(parts) == 3:
                 footpath, val, err_raw = parts
                 exp = _err(err_raw)
-                if _clean(err_raw) == "true":
-                    if test_name == "test_validate_kerb_width":
-                        exp += " (kerb < 750)"
-                    elif test_name == "test_validate_footpath_width":
-                        exp += " (width < 1.5 or None)"
-                    elif test_name == "test_validate_railing_height":
-                        exp += " (height < 1100)"
                 if test_name == "test_validate_kerb_width":
                     return f"footpath={footpath}  |  kerb={_unit(val, 'mm')}  |  expect={exp}"
                 if test_name == "test_validate_footpath_width":
@@ -234,28 +168,19 @@ def _fmt(test_name: str, raw: str) -> str:
         if test_name == "test_validate_stud_height":
             # format: <value>-<True/False>   (value may be negative)
             val = "-".join(parts[:-1])
-            exp = _err(parts[-1])
-            if _clean(parts[-1]) == "true":
-                exp += " (height < 100)"
-            return f"stud_height={_unit(val, 'mm')}  |  expect={exp}"
+            return f"stud_height={_unit(val, 'mm')}  |  expect={_err(parts[-1])}"
 
         if test_name == "test_validate_stud_diameter":
             # format: <stud_d>-<flange_t>-<True/False>
             if len(parts) == 3:
                 stud_d, flange_t, err_raw = parts
-                exp = _err(err_raw)
-                if _clean(err_raw) == "true":
-                    exp += " (stud_dia > 2 * flange_t)"
                 return (f"stud_dia={_unit(stud_d, 'mm')}  |  flange_t={_unit(flange_t, 'mm')}  |  "
-                        f"expect={exp}")
+                        f"expect={_err(err_raw)}")
 
         if test_name == "test_validate_stud_edge_distance":
             # format: <value>-<True/False>   (value may be negative)
             val = "-".join(parts[:-1])
-            exp = _err(parts[-1])
-            if _clean(parts[-1]) == "true":
-                exp += " (edge_dist < 25)"
-            return f"edge_dist={_unit(val, 'mm')}  |  expect={exp}"
+            return f"edge_dist={_unit(val, 'mm')}  |  expect={_err(parts[-1])}"
 
         if test_name == "test_validate_additional_inputs_all_valid_combinations":
             # format: footpath-kerb-fp_width-railing
@@ -266,43 +191,9 @@ def _fmt(test_name: str, raw: str) -> str:
         if test_name == "test_validate_additional_inputs_footpath_combinations_expanded":
             # format: footpath-kerb-fp_width-railing-expected_status
             if len(parts) >= 5:
-                footpath = parts[0]
-                kerb_str = parts[1]
-                fp_width_str = parts[2]
-                railing_str = parts[3]
-                
-                # Parse numeric values
-                def to_val(s):
-                    if s.strip().lower() in ("none", "null", ""):
-                        return None
-                    try:
-                        return float(s)
-                    except ValueError:
-                        return None
-                
-                kerb = to_val(kerb_str)
-                fp_width = to_val(fp_width_str)
-                railing = to_val(railing_str)
-                
-                invalid_fields = []
-                if footpath == "None":
-                    if kerb is not None and kerb < 750:
-                        invalid_fields.append("kerb")
-                    if railing is not None and railing < 1100:
-                        invalid_fields.append("railing")
-                else:
-                    if fp_width is not None and fp_width < 1.5:
-                        invalid_fields.append("fp_width")
-                    if railing is not None and railing < 1100:
-                        invalid_fields.append("railing")
-                
-                exp_status = _clean(parts[-1]) == "true"
-                exp = "OK" if exp_status else "FAIL"
-                if not exp_status and invalid_fields:
-                    exp += f" (invalid: {', '.join(invalid_fields)})"
-                
-                return (f"footpath={footpath}  |  kerb={_unit(kerb_str, 'mm')}  |  "
-                        f"fp_width={_unit(fp_width_str, 'm')}  |  railing={_unit(railing_str, 'mm')}  |  expect={exp}")
+                exp = "OK" if _clean(parts[-1]) == "true" else "FAIL"
+                return (f"footpath={parts[0]}  |  kerb={_unit(parts[1], 'mm')}  |  "
+                        f"fp_width={_unit(parts[2], 'm')}  |  railing={_unit(parts[3], 'mm')}  |  expect={exp}")
 
         if test_name == "test_cross_field_span_carriageway_interaction":
             # format: span-cw-median-span_err-cw_err
@@ -321,7 +212,6 @@ def _fmt(test_name: str, raw: str) -> str:
         pass
 
     return raw   # fallback: show raw param string unchanged
-
 
 # ── Terminal summary hook ────────────────────────────────────────────────────
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
