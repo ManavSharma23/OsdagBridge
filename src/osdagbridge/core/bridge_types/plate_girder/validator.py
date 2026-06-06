@@ -130,7 +130,7 @@ class BridgeInputValidator:
         # ----------------------------
         railing_height = self._to_float(inputs.get("railing_height"))
 
-        if railing_height is not None and footpath in KEY_FOOTPATH:
+        if railing_height is not None and footpath in VALUES_FOOTPATH:
             if railing_height < KEY_RAILING_MIN_HEIGHT[0]:
                 errors["railing_height"] = (
                     f"Minimum railing height is "
